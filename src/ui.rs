@@ -1,3 +1,8 @@
+//! View step: pure rendering of [`App`] state to a ratatui [`Frame`].
+//!
+//! Kept as a free function (rather than `impl Widget for &App`) so `app.rs`
+//! stays fully decoupled from ratatui's rendering types.
+
 use ratatui::{
     Frame,
     layout::Alignment,

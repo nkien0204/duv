@@ -1,3 +1,10 @@
+//! Update step: translates input into state mutations.
+//!
+//! This is the intended home for future keybinding logic — mapping both
+//! vim-style (`j`/`k`/`gg`/`G`) and non-vim (arrow keys, `Home`/`End`) input
+//! to the same actions on [`App`], so both interaction styles are
+//! supported simultaneously.
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::App;

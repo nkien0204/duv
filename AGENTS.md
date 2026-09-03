@@ -17,14 +17,16 @@ before assuming something exists.
 
 ## Current state
 
-- `src/main.rs` — thin entry point, wires up the terminal and hands off to
-  `app`.
-- `src/app.rs` — minimal application loop/state (draws one frame, exits on
-  `q`/`Esc`/`Ctrl+C`). Scanner and model are not yet implemented.
-- `src/ui.rs` — terminal setup/teardown (`crossterm` raw mode + alternate
-  screen) and rendering of the current app state via `ratatui`.
-- Dependency: `ratatui` (pulls in the `crossterm` backend by default).
-- No scanning logic or tree model yet.
+The terminal shell follows a Model-Update-View split across five modules
+(`app`, `event`, `update`, `ui`, `tui`) plus a thin `main.rs`. See
+[ARCHITECTURE.md](./ARCHITECTURE.md) for the full breakdown of each module
+and how they communicate — keep that document up to date alongside this
+one whenever the module structure changes.
+
+- Dependencies: `ratatui` (pulls in the `crossterm` backend by default),
+  `anyhow` (error propagation).
+- No scanning logic or tree model yet — only the terminal/event/render
+  scaffold exists.
 
 ## Planned architecture
 

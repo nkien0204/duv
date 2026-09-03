@@ -1,3 +1,10 @@
+//! Terminal lifecycle management.
+//!
+//! Wraps the ratatui `Terminal` and [`crate::event::EventHandler`], and
+//! owns entering/leaving raw mode and the alternate screen. Installs a
+//! panic hook that restores the terminal before re-raising, so a crash
+//! never leaves the user's shell in a broken state.
+
 use std::{io, panic};
 
 use anyhow::Result;

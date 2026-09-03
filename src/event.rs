@@ -1,3 +1,11 @@
+//! Terminal input, read on a dedicated background thread.
+//!
+//! Polls crossterm for key/mouse/resize events and forwards them, along
+//! with a fixed-interval `Tick`, through an `mpsc` channel as a unified
+//! [`Event`]. This decouples "wait for the next thing to happen" from
+//! "redraw," and gives the app a heartbeat (`Event::Tick`) independent of
+//! key activity for driving future background scan progress.
+
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
 use std::{
