@@ -1,0 +1,9 @@
+[package]
+name = "duv"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+ratatui = "0.30"
