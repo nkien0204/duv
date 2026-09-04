@@ -15,6 +15,8 @@ pub fn update(app: &mut App, key_event: KeyEvent) {
         KeyCode::Char('c') | KeyCode::Char('C') if key_event.modifiers == KeyModifiers::CONTROL => {
             app.quit()
         }
+        KeyCode::Char('j') | KeyCode::Down => app.select_next(),
+        KeyCode::Char('k') | KeyCode::Up => app.select_previous(),
         _ => {}
     };
 }

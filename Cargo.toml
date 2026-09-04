@@ -7,3 +7,4 @@ license = "MIT"
 [dependencies]
 anyhow = "1.0.104"
 ratatui = "0.30"
+sysinfo = { version = "0.39", default-features = false, features = ["disk"] }

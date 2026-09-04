@@ -1,6 +1,9 @@
 /// Application.
 pub mod app;
 
+/// Disk/volume enumeration.
+pub mod disks;
+
 /// Terminal events handler.
 pub mod event;
 

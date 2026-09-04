@@ -1,8 +1,8 @@
 # Architecture
 
 This document describes how `duv`'s code is organized and why. It's aimed at
-contributors (human or AI agent) who need to know *where* to add new
-functionality and *how* the pieces communicate.
+contributors (human or AI agent) who need to know _where_ to add new
+functionality and _how_ the pieces communicate.
 
 > **Status:** early development. Only the terminal shell exists so far — no
 > scanner or model. This document describes the current skeleton and the
@@ -23,6 +23,7 @@ flowchart LR
     EV -- mpsc channel --> MAIN[main.rs\nmain loop]
     MAIN -- KeyEvent --> UPD[update.rs\nupdate&#40;&#41;]
     UPD -- mutates --> APP[app.rs\nApp state]
+    DISKS[disks.rs\nlist&#40;&#41;] -- populates --> APP
     MAIN -- draw --> TUI[tui.rs\nTui]
     TUI -- calls --> UI[ui.rs\nrender&#40;&#41;]
     UI -- reads --> APP
@@ -32,11 +33,27 @@ flowchart LR
 
 ### `app.rs` — Model
 
-Holds all application state (currently just `should_quit`). Deliberately has
-**no dependency on ratatui's rendering types** (`Buffer`, `Rect`, `Widget`)
-or crossterm's event types — it doesn't know how it's drawn or how input
-arrives. As the scanner/model land, the scanned directory tree, current
-selection, navigation stack, etc. will live here.
+Holds all application state: `should_quit`, the list of mounted disks
+(`disks: Vec<disks::DiskInfo>`), and the currently highlighted row
+(`selected: usize`). Deliberately has **no dependency on ratatui's
+rendering types** (`Buffer`, `Rect`, `Widget`) or crossterm's event types —
+it doesn't know how it's drawn or how input arrives. It also avoids
+depending on `sysinfo`'s types directly, going through `disks::DiskInfo`
+instead (see below). As the scanner/model land, the scanned directory tree,
+navigation stack, etc. will live here too.
+
+### `disks.rs` — disk/volume enumeration
+
+`disks::list() -> Vec<DiskInfo>` wraps `sysinfo::Disks` to enumerate every
+mounted disk/volume visible to the OS (handling the case where a machine
+has more than one disk). `DiskInfo` and `DiskKind` are plain, crate-local
+types — not re-exports of `sysinfo`'s — so the `sysinfo` dependency stays
+isolated to this one module and `App` never has to know about it. This is
+the first step toward letting the user pick which disk/volume to scan;
+`App::new()` currently populates `disks` once at startup via `disks::list()`.
+
+Also home to `format_bytes()`, a small binary-unit (`KiB`/`MiB`/...)
+human-readable size formatter used by `ui.rs`.
 
 ### `event.rs` — input source
 
@@ -55,18 +72,21 @@ decoupling "wait for the next thing to happen" from "redraw."
 ### `update.rs` — Update (reducer)
 
 `update(app: &mut App, key_event: KeyEvent)` is where key presses are
-translated into state mutations. This is the intended home for future
-keybinding logic — mapping both vim-style (`j`/`k`/`gg`/`G`) and non-vim
-(arrow keys, `Home`/`End`) input to the same actions, so both interaction
-styles are supported simultaneously. Currently it only handles quitting
-(`q` / `Esc` / `Ctrl+C`).
+translated into state mutations, mapping both vim-style (`j`/`k`) and
+non-vim (arrow keys) input to the same actions so both interaction styles
+are supported simultaneously. Currently handles quitting (`q` / `Esc` /
+`Ctrl+C`) and moving the disk-list selection (`j`/`Down`, `k`/`Up`, via
+`App::select_next`/`App::select_previous`). Future additions (`gg`/`G`,
+`Home`/`End`, entering a directory, etc.) belong here too.
 
 ### `ui.rs` — View
 
 `render(app: &mut App, frame: &mut Frame)` is a pure rendering function: it
 reads `App` state and produces widgets, without mutating state or doing
 I/O. Keeping this a free function (rather than `impl Widget for &App`) keeps
-`app.rs` fully decoupled from ratatui's rendering types.
+`app.rs` fully decoupled from ratatui's rendering types. Currently renders
+`app.disks` as a `Table` (name, mount point, kind, filesystem, used/total
+space via `disks::format_bytes`), highlighting the row at `app.selected`.
 
 ### `tui.rs` — terminal lifecycle
 
@@ -105,6 +125,10 @@ tui.exit()?;
   default. See `AGENTS.md` for the rationale behind this choice.
 - **`anyhow`** — ergonomic error propagation (`Result<()>`) across the event
   thread and terminal setup/teardown paths.
+- **`sysinfo`** (`default-features = false, features = ["disk"]`) — disk/
+  volume enumeration in `disks.rs`. Disabling default features and opting
+  into only the `disk` feature keeps this dependency's footprint minimal,
+  per `AGENTS.md`'s lightweight-dependency convention.
 
 ## Planned additions
 
@@ -117,6 +141,9 @@ Not yet implemented; will slot into the modules above as they land:
   owned by `App`.
 - **`cli`** — argument parsing (likely `clap`) for the entry point in
   `main.rs` (e.g. `duv [path]`).
+- **Disk picker UX** — using `app.selected` and `app.selected_disk()` (both
+  already in place) to let the user confirm a disk/volume and kick off a
+  scan of its mount point, once `scanner` exists.
 
 Don't scaffold these preemptively — add them when the corresponding feature
 is actually being built.

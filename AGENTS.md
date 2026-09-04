@@ -18,15 +18,18 @@ before assuming something exists.
 ## Current state
 
 The terminal shell follows a Model-Update-View split across five modules
-(`app`, `event`, `update`, `ui`, `tui`) plus a thin `main.rs`. See
-[ARCHITECTURE.md](./ARCHITECTURE.md) for the full breakdown of each module
-and how they communicate — keep that document up to date alongside this
-one whenever the module structure changes.
+(`app`, `event`, `update`, `ui`, `tui`) plus a thin `main.rs`. A `disks`
+module enumerates mounted disks/volumes (via `sysinfo`), feeding `App` a
+plain, crate-local `DiskInfo` list that `ui` renders as a selectable table.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full breakdown of each
+module and how they communicate — keep that document up to date alongside
+this one whenever the module structure changes.
 
 - Dependencies: `ratatui` (pulls in the `crossterm` backend by default),
-  `anyhow` (error propagation).
-- No scanning logic or tree model yet — only the terminal/event/render
-  scaffold exists.
+  `anyhow` (error propagation), `sysinfo` (disk/volume enumeration only,
+  via `default-features = false, features = ["disk"]`).
+- Disk enumeration exists (`src/disks.rs`); no filesystem scanning logic or
+  directory tree model yet.
 
 ## Planned architecture
 
