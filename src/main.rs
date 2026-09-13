@@ -7,6 +7,9 @@ pub mod disks;
 /// Terminal events handler.
 pub mod event;
 
+/// First-level directory-size scanning.
+pub mod scanner;
+
 /// Widget renderer.
 pub mod ui;
 
@@ -40,7 +43,7 @@ fn main() -> Result<()> {
         tui.draw(&mut app)?;
         // Handle events.
         match tui.events.next()? {
-            Event::Tick => {}
+            Event::Tick => app.tick(),
             Event::Key(key_event) => update(&mut app, key_event),
             Event::Mouse(_) => {}
             Event::Resize(_, _) => {}
