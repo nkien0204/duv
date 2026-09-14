@@ -18,15 +18,32 @@ before assuming something exists.
 ## Current state
 
 The terminal shell follows a Model-Update-View split across five modules
-(`app`, `event`, `update`, `ui`, `tui`) plus a thin `main.rs`. See
-[ARCHITECTURE.md](./ARCHITECTURE.md) for the full breakdown of each module
-and how they communicate — keep that document up to date alongside this
-one whenever the module structure changes.
+(`app`, `event`, `update`, `ui`, `tui`) plus a thin `main.rs`. A `disks`
+module enumerates mounted disks/volumes (via `sysinfo`), feeding `App` a
+plain, crate-local `DiskInfo` list that `ui` renders as a selectable table.
+Pressing `s` on a selected disk triggers `scanner::Scanner`, which measures
+the immediate children of that directory on a background thread
+(parallelized with `rayon`) and streams results back to `App` via an
+`mpsc` channel polled on every `Event::Tick`; `ui` shows a progress `Gauge`
+while it runs and a size-sorted `Table` once finished. A `Scanner` only
+ever measures one level — drilling into a subdirectory (`l`/`Right`/
+`Enter`) spawns another `Scanner` rooted there, pushing the previous one
+onto `App::scanner_history` so backing out (`h`/`Left`/`Backspace`/`Esc`)
+restores it without re-scanning. See [ARCHITECTURE.md](./ARCHITECTURE.md)
+for the full breakdown of each module and how they communicate — keep
+that document up to date alongside this one whenever the module structure
+changes.
 
 - Dependencies: `ratatui` (pulls in the `crossterm` backend by default),
-  `anyhow` (error propagation).
-- No scanning logic or tree model yet — only the terminal/event/render
-  scaffold exists.
+  `anyhow` (error propagation), `sysinfo` (disk/volume enumeration only,
+  via `default-features = false, features = ["disk"]`), `rayon`
+  (parallel directory-size scanning).
+- Disk enumeration (`src/disks.rs`) and one-level-at-a-time directory-size
+  scanning with drill-down navigation (`src/scanner.rs`, `App::scanner`/
+  `App::scanner_history`) exist; no full recursive tree model or
+  delete/manage actions yet.
+- Keybindings support both vim-style (`j`/`k`/`h`/`l`) and non-vim (arrow
+  keys, `Enter`, `Backspace`) navigation for the same actions.
 
 ## Planned architecture
 
