@@ -42,7 +42,8 @@ flowchart LR
 
 ### `app.rs` — Model
 
-Holds all application state: `should_quit`, the list of mounted disks
+Holds all application state: `should_quit`, whether to show a quit confirmation
+(`quit_confirmation: Option<QuitOption>`), the list of mounted disks
 (`disks: Vec<disks::DiskInfo>`), the currently highlighted disk row
 (`selected: usize`), and the drill-down navigation state:
 
@@ -135,9 +136,10 @@ translated into state mutations, mapping both vim-style (`j`/`k`/`h`/`l`)
 and non-vim (arrow keys, `Enter`, `Backspace`) input to the same actions so
 both interaction styles are supported simultaneously. Currently handles:
 
-- `q` / `Ctrl+C` — quit unconditionally.
+- `q` / `Esc` (on disk list) — trigger a quit confirmation popup.
+- `Ctrl+C` — quit unconditionally.
 - `Esc` — goes back one level (`App::go_back`) if a scan/error view is
-  open; quits otherwise. This lets `Esc` act as "back" before it acts as
+  open; triggers quit confirmation otherwise. This lets `Esc` act as "back" before it acts as
   "quit."
 - `h` / `Left` / `Backspace` — same as `Esc`, but only when there's
   somewhere to go back to (no-op on the disk list).
@@ -169,12 +171,14 @@ rendering types. Dispatches on `App` state to one of three views:
   highlighting the row at `app.selected` and auto-scrolling to keep it in
   view once the list is taller than the terminal.
 - A scan in progress (`app.scanner` is `Some` and not finished) — a `Gauge`
-  progress bar showing `entries measured / total`.
+  progress bar (with a border) showing `entries measured / total`.
 - A finished scan — a `Table` of `scanner.entries` (name, Dir/File, size),
   sorted by size descending, rendered statefully with `scanner.table_state`
   (same highlighting/auto-scroll behavior as the disk table).
 - `app.scanner_error` set — an error `Paragraph` instead of any of the
   above.
+- `app.quit_confirmation` set — a centered modal popup asking the user to
+  confirm quitting, with "Yes" and "No" options.
 
 ### `tui.rs` — terminal lifecycle
 

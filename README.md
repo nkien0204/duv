@@ -6,7 +6,7 @@ A fast terminal-based disk usage manager and monitor, written in Rust.
 disk space, and lets you drill down and clean up files without leaving the
 terminal.
 
-> **Status:** early development. The core scanning/UI is not implemented yet.
+> **Status:** early development. Core disk enumeration and directory scanning are implemented.
 
 ## Features (planned)
 
@@ -40,6 +40,17 @@ duv [path]
 ```
 
 Runs `duv` against the given path (defaults to the current directory).
+
+## Controls
+
+| Key                             | Action                   |
+| ------------------------------- | ------------------------ |
+| `j` / `k` / `↓` / `↑`           | Move selection           |
+| `l` / `Enter` / `→`             | Open directory           |
+| `h` / `Backspace` / `←` / `Esc` | Go back / Cancel         |
+| `s`                             | Start/Rescan             |
+| `q`                             | Quit (with confirmation) |
+| `Ctrl+C`                        | Quit unconditionally     |
 
 ## Development
 
