@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Alignment, Constraint},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph, Row, Table},
 };
 
 use crate::app::App;
@@ -207,8 +207,14 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         let gauge = Gauge::default()
             .gauge_style(Style::default().fg(Color::Yellow))
             .ratio(ratio)
-            .label(label);
+            .label(label)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded),
+            );
 
+        frame.render_widget(Clear, area);
         frame.render_widget(gauge, area);
     }
 }
@@ -218,7 +224,7 @@ fn render_quit_confirmation(app: &App, frame: &mut Frame) {
 
     let area = frame.area();
     let popup_width = 40;
-    let popup_height = 7;
+    let popup_height = 5;
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -259,6 +265,7 @@ fn render_quit_confirmation(app: &App, frame: &mut Frame) {
         ]),
     ];
 
+    frame.render_widget(Clear, popup_area);
     frame.render_widget(
         Paragraph::new(text)
             .block(block)
