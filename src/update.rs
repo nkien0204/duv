@@ -10,16 +10,41 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::App;
 
 pub fn update(app: &mut App, key_event: KeyEvent) {
+    if let Some(selected) = app.quit_confirmation {
+        match key_event.code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                app.quit_confirmation = Some(crate::app::QuitOption::Yes);
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                app.quit_confirmation = Some(crate::app::QuitOption::No);
+            }
+            KeyCode::Enter => {
+                if selected == crate::app::QuitOption::Yes {
+                    app.quit();
+                } else {
+                    app.quit_confirmation = None;
+                }
+            }
+            KeyCode::Esc | KeyCode::Backspace => {
+                app.quit_confirmation = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match key_event.code {
         KeyCode::Char('c') | KeyCode::Char('C') if key_event.modifiers == KeyModifiers::CONTROL => {
             app.quit()
         }
-        KeyCode::Char('q') => app.quit(),
+        KeyCode::Char('q') => {
+            app.quit_confirmation = Some(crate::app::QuitOption::No);
+        }
         KeyCode::Esc => {
             if app.scanner.is_some() || app.scanner_error.is_some() {
                 app.go_back();
             } else {
-                app.quit();
+                app.quit_confirmation = Some(crate::app::QuitOption::No);
             }
         }
         KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {

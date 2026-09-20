@@ -10,8 +10,16 @@ use std::path::PathBuf;
 use crate::disks::{self, DiskInfo};
 use crate::scanner::Scanner;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitOption {
+    Yes,
+    No,
+}
+
 pub struct App {
     pub should_quit: bool,
+    /// Whether to show the quit confirmation popup, and which option is selected.
+    pub quit_confirmation: Option<QuitOption>,
     /// Every mounted disk/volume visible to the OS, as of the last refresh.
     pub disks: Vec<DiskInfo>,
     /// Index into `disks` of the currently highlighted entry.
@@ -40,6 +48,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             should_quit: false,
+            quit_confirmation: None,
             disks: disks::list(),
             selected: 0,
             disks_table_state: ratatui::widgets::TableState::default().with_selected(Some(0)),

@@ -17,13 +17,15 @@ use crate::disks::format_bytes;
 pub fn render(app: &mut App, frame: &mut Frame) {
     if let Some(error) = app.scanner_error.clone() {
         render_error(&error, frame);
-        return;
-    }
-    if app.scanner.is_some() {
+    } else if app.scanner.is_some() {
         render_scan(app, frame);
-        return;
+    } else {
+        render_disks(app, frame);
     }
-    render_disks(app, frame);
+
+    if app.quit_confirmation.is_some() {
+        render_quit_confirmation(app, frame);
+    }
 }
 
 fn render_error(error: &str, frame: &mut Frame) {
@@ -119,25 +121,9 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         return;
     };
     let root = scanner.root.display().to_string();
+    let is_scanning = !scanner.finished;
 
-    if !scanner.finished {
-        let block = Block::default()
-            .title(format!("DUV — scanning {root} (Esc to cancel)"))
-            .title_alignment(Alignment::Center)
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded);
-        let ratio = scanner.progress_fraction().clamp(0.0, 1.0);
-        let label = format!("{}/{} entries", scanner.entries.len(), scanner.total);
-        let gauge = Gauge::default()
-            .block(block)
-            .gauge_style(Style::default().fg(Color::Yellow))
-            .ratio(ratio)
-            .label(label);
-        frame.render_widget(gauge, frame.area());
-        return;
-    }
-
-    let block = Block::default()
+    let mut block = Block::default()
         .title(format!(
             "DUV — {root} (l/Enter to open, h/Esc to go back, s to rescan, q to quit)"
         ))
@@ -145,51 +131,138 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
 
+    if is_scanning {
+        block = block.border_style(Style::default().fg(Color::DarkGray));
+    }
+
     if scanner.entries.is_empty() {
         frame.render_widget(
             Paragraph::new("Empty directory.")
                 .block(block)
-                .style(Style::default().fg(Color::Yellow))
+                .style(if is_scanning {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                })
                 .alignment(Alignment::Center),
             frame.area(),
         );
-        return;
+    } else {
+        let header_style = if is_scanning {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+
+        let header = Row::new(vec![
+            Cell::from("Name"),
+            Cell::from("Type"),
+            Cell::from("Size"),
+        ])
+        .style(header_style);
+
+        let rows = scanner.entries.iter().enumerate().map(|(i, entry)| {
+            let style = if is_scanning {
+                Style::default().fg(Color::DarkGray)
+            } else if i == scanner.selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(entry.name.clone()),
+                Cell::from(if entry.is_dir { "Dir" } else { "File" }),
+                Cell::from(format_bytes(entry.size)),
+            ])
+            .style(style)
+        });
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Percentage(60),
+                Constraint::Percentage(15),
+                Constraint::Percentage(25),
+            ],
+        )
+        .header(header)
+        .block(block);
+
+        frame.render_stateful_widget(table, frame.area(), &mut scanner.table_state);
     }
 
-    let header = Row::new(vec![
-        Cell::from("Name"),
-        Cell::from("Type"),
-        Cell::from("Size"),
-    ])
-    .style(Style::default().add_modifier(Modifier::BOLD));
+    if is_scanning {
+        let bar_width = (frame.area().width as f32 * 0.5).max(40.0) as u16;
+        let bar_height = 3;
 
-    let rows = scanner.entries.iter().enumerate().map(|(i, entry)| {
-        let style = if i == scanner.selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        Row::new(vec![
-            Cell::from(entry.name.clone()),
-            Cell::from(if entry.is_dir { "Dir" } else { "File" }),
-            Cell::from(format_bytes(entry.size)),
-        ])
-        .style(style)
-    });
+        let x = (frame.area().width.saturating_sub(bar_width)) / 2;
+        let y = frame.area().height.saturating_sub(bar_height + 2); // Bottom-ish
+        let area = ratatui::layout::Rect::new(x, y, bar_width, bar_height);
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(60),
-            Constraint::Percentage(15),
-            Constraint::Percentage(25),
-        ],
-    )
-    .header(header)
-    .block(block);
+        let ratio = scanner.progress_fraction().clamp(0.0, 1.0);
+        let label = format!("{}/{} entries", scanner.entries.len(), scanner.total);
+        let gauge = Gauge::default()
+            .gauge_style(Style::default().fg(Color::Yellow))
+            .ratio(ratio)
+            .label(label);
 
-    frame.render_stateful_widget(table, frame.area(), &mut scanner.table_state);
+        frame.render_widget(gauge, area);
+    }
+}
+
+fn render_quit_confirmation(app: &App, frame: &mut Frame) {
+    use ratatui::layout::Rect;
+
+    let area = frame.area();
+    let popup_width = 40;
+    let popup_height = 7;
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    let block = Block::default()
+        .title(" Quit ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+
+    let yes_style = if app.quit_confirmation == Some(crate::app::QuitOption::Yes) {
+        Style::default()
+            .bg(Color::Yellow)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let no_style = if app.quit_confirmation == Some(crate::app::QuitOption::No) {
+        Style::default()
+            .bg(Color::Yellow)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let text = vec![
+        Line::from(vec![ratatui::text::Span::styled(
+            " Are you sure you want to quit? ",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            ratatui::text::Span::styled(" Yes ", yes_style),
+            ratatui::text::Span::raw("   "),
+            ratatui::text::Span::styled(" No ", no_style),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(block)
+            .alignment(Alignment::Center),
+        popup_area,
+    );
 }
