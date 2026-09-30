@@ -25,14 +25,18 @@ module enumerates mounted disks/volumes (via `sysinfo`), feeding `App` a
 plain, crate-local `DiskInfo` list that `ui` renders as a selectable table.
 Pressing `s` on a selected disk triggers `scanner::Scanner`, which walks
 everything under that directory on a background thread (parallelized with
-`rayon`) and streams each first-level branch back via an `mpsc` channel
-polled on every `Event::Tick`, grafting it into a `model::Tree` (a flat,
-`u32`-indexed node list holding every scanned file and directory). `ui`
+`rayon`) and streams each directory's listing back via an `mpsc` channel
+polled on every `Event::Tick`, adding it to a `model::Tree` (a flat,
+`u32`-indexed node list of scanned files and directories) kept within a
+memory budget (`--memory-budget`, default 256 MiB): over budget,
+directories are stored as totals only, loaded in place when opened, and
+least recently visited branches are evicted to make room. `ui`
 shows a progress `Gauge` (with a border) while it runs and a size-sorted
 `Table` once finished. Drilling into a subdirectory (`l`/`Right`/`Enter`)
 and backing out (`h`/`Left`/`Backspace`/`Esc`) move around that tree with
-no rescanning; only directories whose contents weren't collected (another
-filesystem, or unreadable) spawn another `Scanner`, with the previous one
+no rescanning (or a load in place for budget-skipped directories); only
+directories on another filesystem or unreadable ones spawn another
+`Scanner`, with the previous one
 kept on `App::scanner_history`. A confirmation popup appears when the user
 presses `q` to quit, allowing them to choose Yes or No. See [ARCHITECTURE.md](./ARCHITECTURE.md)
 for the full breakdown of each module and how they communicate — keep
@@ -43,11 +47,12 @@ changes.
   `anyhow` (error propagation), `clap` (`duv [path]` parsing in `src/cli.rs`,
   minimal feature set), `sysinfo` (disk/volume enumeration only,
   via `default-features = false, features = ["disk"]`), `rayon`
-  (parallel directory-size scanning).
+  (parallel directory-size scanning), `libc` (Unix only, peak memory for
+  the hidden `--stats` developer flag).
 - Disk enumeration (`src/disks.rs`), full-tree directory scanning
-  (`src/scanner.rs`) into an in-memory tree (`src/model.rs`), and
-  drill-down navigation of that tree exist; no delete/manage actions or
-  memory budget for the tree yet.
+  (`src/scanner.rs`) into a memory-budgeted in-memory tree
+  (`src/model.rs`), and drill-down navigation of that tree exist; no
+  delete/manage actions yet.
 - Keybindings support both vim-style (`j`/`k`/`h`/`l`) and non-vim (arrow
   keys, `Enter`, `Backspace`) navigation for the same actions.
 
@@ -113,6 +118,11 @@ cargo clippy
 
 If any of these fail because of pre-existing issues unrelated to your
 change, note it rather than silently ignoring it.
+
+For changes to scanning or the tree model, also compare
+`cargo build --release && ./target/release/duv --stats <path>` before and
+after on a large directory (e.g. your home directory) to catch time or
+memory regressions.
 
 ## Working with this repo as an agent
 

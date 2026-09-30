@@ -204,7 +204,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         let area = ratatui::layout::Rect::new(x, y, bar_width, bar_height);
 
         let ratio = scanner.progress_fraction().clamp(0.0, 1.0);
-        let label = format!("{}/{} entries", scanner.measured, scanner.total);
+        let label = format!("{}/{} folders", scanner.measured, scanner.total);
         let gauge = Gauge::default()
             .gauge_style(Style::default().fg(Color::Yellow))
             .ratio(ratio)

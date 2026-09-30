@@ -6,19 +6,20 @@
 //! walking up to the root (see [`Tree::path`]), so no `PathBuf` is kept
 //! per node.
 //!
-//! A directory's children are either [`Children::Loaded`] or
-//! [`Children::Unloaded`]. An unloaded directory still knows its total
-//! size, it just doesn't hold its entries in memory. This lets the tree
-//! skip or later evict parts of a large scan (to stay within a memory
-//! budget) without changing any totals shown to the user.
+//! A directory's entries are only held in memory when its children are
+//! [`Children::Loaded`]; otherwise the directory still knows its total
+//! size, so totals shown to the user never depend on what's loaded. This
+//! is what lets the scanner stay within a memory budget: it can skip
+//! storing a directory's entries (leaving it [`Children::Unloaded`]) or
+//! drop them later with [`Tree::evict_children`], and load them again on
+//! demand.
+//!
+//! Evicted nodes become [`NodeKind::Free`] slots that later insertions
+//! reuse, so the node list stops growing once the budget is reached.
 //!
 //! Invariant: a loaded directory's `size` is the sum of its children's
-//! sizes. [`Tree::add_child`] and [`Tree::attach`] maintain this by adding
-//! each new node's size to all of its ancestors.
-//!
-//! [`Subtree`] is a temporary, nested form of a branch, built by the
-//! scanner's parallel walk (where threads can't share one `Tree`) and
-//! then flattened into the tree in one pass with [`Tree::attach`].
+//! sizes. [`Tree::add_child`] and [`Tree::add_size`] maintain this by
+//! adding every size change to all of the node's ancestors.
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +33,7 @@ pub struct Node {
     pub name: Box<str>,
     /// Size in bytes: a file's length, or a directory's recursive total.
     pub size: u64,
-    /// `None` only for the root.
+    /// `None` only for the root (and free slots).
     pub parent: Option<NodeId>,
     pub kind: NodeKind,
 }
@@ -43,65 +44,29 @@ impl Node {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum NodeKind {
     File,
     Dir(Children),
+    /// An evicted slot waiting to be reused. Never returned by
+    /// [`Tree::get`].
+    Free,
 }
 
-/// Whether a directory's entries are held in memory.
-#[derive(Debug)]
+/// Whether a directory's entries are held in memory, and if not, why.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Children {
-    /// Entries are in memory, in insertion order until
-    /// [`Tree::sort_children_by_size`] is called.
+    /// Entries are in memory, in insertion order until sorted.
     Loaded(Vec<NodeId>),
-    /// Entries aren't in memory (never scanned, or evicted); the
-    /// directory's `size` is still accurate.
+    /// Entries aren't in memory: not listed yet, skipped to stay within
+    /// the memory budget, or evicted. Can be loaded into the tree later;
+    /// `size` is accurate once the scan that measured it has finished.
     Unloaded,
-}
-
-/// A branch built outside a [`Tree`], to be flattened into one with
-/// [`Tree::attach`].
-#[derive(Debug)]
-pub struct Subtree {
-    pub name: Box<str>,
-    pub size: u64,
-    pub kind: SubtreeKind,
-}
-
-#[derive(Debug)]
-pub enum SubtreeKind {
-    File,
-    Loaded(Vec<Subtree>),
-    Unloaded,
-}
-
-impl Subtree {
-    pub fn file(name: impl Into<Box<str>>, size: u64) -> Self {
-        Self {
-            name: name.into(),
-            size,
-            kind: SubtreeKind::File,
-        }
-    }
-
-    /// A directory whose entries are in `children`; its size is their sum.
-    pub fn dir(name: impl Into<Box<str>>, children: Vec<Subtree>) -> Self {
-        Self {
-            name: name.into(),
-            size: children.iter().map(|child| child.size).sum(),
-            kind: SubtreeKind::Loaded(children),
-        }
-    }
-
-    /// A directory whose entries weren't collected, with a known `size`.
-    pub fn unloaded_dir(name: impl Into<Box<str>>, size: u64) -> Self {
-        Self {
-            name: name.into(),
-            size,
-            kind: SubtreeKind::Unloaded,
-        }
-    }
+    /// The directory is the mount point of another filesystem. Its space
+    /// isn't counted (`size` is `0`) and it's never loaded into this tree.
+    OtherFilesystem,
+    /// The directory couldn't be listed (e.g. permission denied).
+    Unreadable,
 }
 
 /// A directory tree rooted at `root_path`.
@@ -109,7 +74,9 @@ impl Subtree {
 pub struct Tree {
     root_path: PathBuf,
     nodes: Vec<Node>,
-    /// Running estimate of the heap and inline memory used by `nodes`.
+    /// Slots in `nodes` freed by eviction, reused before growing `nodes`.
+    free: Vec<NodeId>,
+    /// Running estimate of the memory used by live nodes.
     approx_bytes: usize,
 }
 
@@ -129,6 +96,7 @@ impl Tree {
         Self {
             root_path,
             nodes: vec![root],
+            free: Vec::new(),
             approx_bytes: std::mem::size_of::<Node>(),
         }
     }
@@ -138,23 +106,43 @@ impl Tree {
         &self.root_path
     }
 
+    /// The node with this id, or `None` if it doesn't exist or its slot is
+    /// free.
     pub fn get(&self, id: NodeId) -> Option<&Node> {
-        self.nodes.get(id as usize)
+        self.nodes
+            .get(id as usize)
+            .filter(|node| !matches!(node.kind, NodeKind::Free))
     }
 
-    /// Number of nodes in the tree, including the root.
+    /// Every live node, with its id.
+    pub fn iter(&self) -> impl Iterator<Item = (NodeId, &Node)> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| !matches!(node.kind, NodeKind::Free))
+            .map(|(id, node)| (id as NodeId, node))
+    }
+
+    /// Number of live nodes in the tree, including the root.
     pub fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.nodes.len() - self.free.len()
     }
 
-    /// Estimated memory used by the tree's nodes, in bytes: each node's
-    /// inline size, its name, and its slot in its parent's child list.
+    /// Number of node slots the tree can hold before its node list
+    /// reallocates. Spare capacity is real memory not counted by
+    /// [`Tree::approx_bytes`].
+    pub fn node_capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
+    /// Estimated memory used by live nodes, in bytes: each node's inline
+    /// size, its name, and its slot in its parent's child list.
     pub fn approx_bytes(&self) -> usize {
         self.approx_bytes
     }
 
-    /// The loaded children of `id`, or `None` if it's a file, an unloaded
-    /// directory, or doesn't exist.
+    /// The loaded children of `id`, or `None` if it's a file, a directory
+    /// whose entries aren't loaded, or doesn't exist.
     pub fn children(&self, id: NodeId) -> Option<&[NodeId]> {
         match &self.get(id)?.kind {
             NodeKind::Dir(Children::Loaded(children)) => Some(children),
@@ -162,118 +150,154 @@ impl Tree {
         }
     }
 
-    /// Adds a child under directory `parent` and returns its id.
-    ///
-    /// A directory child starts [`Children::Unloaded`] with the given
-    /// `size` (pass `0` if its entries will be added afterwards). The
-    /// child's `size` is added to every ancestor, and `parent` becomes
-    /// loaded if it wasn't already.
+    /// Adds a child under directory `parent` and returns its id, reusing a
+    /// free slot if there is one. The child's `size` is added to every
+    /// ancestor, and `parent` becomes loaded if it wasn't already.
     ///
     /// Returns `None` if `parent` doesn't exist or is a file.
     pub fn add_child(
         &mut self,
         parent: NodeId,
-        name: &str,
+        name: impl Into<Box<str>>,
         size: u64,
-        is_dir: bool,
+        kind: NodeKind,
     ) -> Option<NodeId> {
-        let id = NodeId::try_from(self.nodes.len()).ok()?;
-        self.link_child(parent, id)?;
-        self.nodes.push(Node {
-            name: name.into(),
-            size,
-            parent: Some(parent),
-            kind: if is_dir {
-                NodeKind::Dir(Children::Unloaded)
-            } else {
-                NodeKind::File
-            },
-        });
-        self.approx_bytes += node_bytes(name);
-        self.add_size_to_ancestors(parent, size);
-        Some(id)
-    }
-
-    /// Flattens `subtree` into the tree as a child of directory `parent`
-    /// and returns the id of its top node. Sizes inside `subtree` are
-    /// taken as given; its total is added to every ancestor.
-    ///
-    /// Returns `None` if `parent` doesn't exist or is a file.
-    pub fn attach(&mut self, parent: NodeId, subtree: Subtree) -> Option<NodeId> {
-        let size = subtree.size;
-        let id = self.push_subtree(parent, subtree)?;
-        self.add_size_to_ancestors(parent, size);
-        Some(id)
-    }
-
-    fn push_subtree(&mut self, parent: NodeId, subtree: Subtree) -> Option<NodeId> {
-        let id = NodeId::try_from(self.nodes.len()).ok()?;
-        self.link_child(parent, id)?;
-        let (kind, children) = match subtree.kind {
-            SubtreeKind::File => (NodeKind::File, Vec::new()),
-            SubtreeKind::Unloaded => (NodeKind::Dir(Children::Unloaded), Vec::new()),
-            SubtreeKind::Loaded(children) => (
-                NodeKind::Dir(Children::Loaded(Vec::with_capacity(children.len()))),
-                children,
-            ),
+        let id = match self.free.last() {
+            Some(&id) => id,
+            None => NodeId::try_from(self.nodes.len()).ok()?,
         };
-        self.approx_bytes += node_bytes(&subtree.name);
-        self.nodes.push(Node {
-            name: subtree.name,
-            size: subtree.size,
-            parent: Some(parent),
-            kind,
-        });
-        for child in children {
-            self.push_subtree(id, child)?;
-        }
-        Some(id)
-    }
-
-    /// Appends `child` to directory `parent`'s child list, making it
-    /// loaded if it wasn't. `None` if `parent` is missing or a file.
-    fn link_child(&mut self, parent: NodeId, child: NodeId) -> Option<()> {
-        let children = match &mut self.nodes.get_mut(parent as usize)?.kind {
-            NodeKind::File => return None,
+        let children = match &mut self.get_mut(parent)?.kind {
             NodeKind::Dir(children) => children,
+            _ => return None,
         };
         match children {
-            Children::Loaded(ids) => ids.push(child),
-            Children::Unloaded => *children = Children::Loaded(vec![child]),
+            Children::Loaded(ids) => ids.push(id),
+            other => *other = Children::Loaded(vec![id]),
         }
-        Some(())
+
+        let name = name.into();
+        self.approx_bytes += node_bytes(&name);
+        let node = Node {
+            name,
+            size: 0,
+            parent: Some(parent),
+            kind,
+        };
+        if self.free.pop().is_some() {
+            self.nodes[id as usize] = node;
+        } else {
+            self.nodes.push(node);
+        }
+        self.add_size(id, size);
+        Some(id)
     }
 
-    fn add_size_to_ancestors(&mut self, from: NodeId, size: u64) {
-        let mut ancestor = Some(from);
-        while let Some(current) = ancestor {
-            let node = &mut self.nodes[current as usize];
+    /// Adds `size` bytes to node `id` and all of its ancestors.
+    pub fn add_size(&mut self, id: NodeId, size: u64) {
+        let mut current = Some(id);
+        while let Some(node) = current.and_then(|id| self.get_mut(id)) {
             node.size += size;
-            ancestor = node.parent;
+            current = node.parent;
+        }
+    }
+
+    /// Sets directory `id`'s size to `0`, subtracting its old size from all
+    /// of its ancestors. Used before (re)loading its entries, which add
+    /// their sizes back as they arrive.
+    pub fn clear_size(&mut self, id: NodeId) {
+        let Some(node) = self.get_mut(id) else {
+            return;
+        };
+        let size = std::mem::take(&mut node.size);
+        let mut current = node.parent;
+        while let Some(node) = current.and_then(|id| self.get_mut(id)) {
+            node.size -= size;
+            current = node.parent;
+        }
+    }
+
+    /// Sets directory `id`'s children state, e.g. to mark it
+    /// [`Children::Unreadable`]. Only valid for a directory whose entries
+    /// aren't loaded (use [`Tree::evict_children`] to drop loaded ones);
+    /// no-op otherwise.
+    pub fn set_children(&mut self, id: NodeId, children: Children) {
+        if let Some(Node {
+            kind: NodeKind::Dir(current),
+            ..
+        }) = self.get_mut(id)
+            && !matches!(current, Children::Loaded(_))
+        {
+            *current = children;
         }
     }
 
     /// Marks directory `id` as loaded with no entries yet, e.g. after
-    /// scanning an empty directory. No-op if it's already loaded or isn't
+    /// listing an empty directory. No-op if it's already loaded or isn't
     /// a directory.
     pub fn mark_loaded(&mut self, id: NodeId) {
-        if let Some(Node {
-            kind: NodeKind::Dir(children @ Children::Unloaded),
+        self.set_children(id, Children::Loaded(Vec::new()));
+    }
+
+    /// Drops every node under directory `id`, freeing their slots for
+    /// reuse, and marks `id` [`Children::Unloaded`]. Sizes are unchanged.
+    /// Calls `on_free` with each freed id, so callers can forget anything
+    /// they keyed by those ids. Returns the number of nodes freed.
+    pub fn evict_children(&mut self, id: NodeId, mut on_free: impl FnMut(NodeId)) -> usize {
+        let Some(Node {
+            kind: NodeKind::Dir(children @ Children::Loaded(_)),
             ..
-        }) = self.nodes.get_mut(id as usize)
-        {
-            *children = Children::Loaded(Vec::new());
+        }) = self.get_mut(id)
+        else {
+            return 0;
+        };
+        let Children::Loaded(mut stack) = std::mem::replace(children, Children::Unloaded) else {
+            return 0;
+        };
+        let mut freed = 0;
+        while let Some(child) = stack.pop() {
+            let node = std::mem::replace(
+                &mut self.nodes[child as usize],
+                Node {
+                    name: "".into(),
+                    size: 0,
+                    parent: None,
+                    kind: NodeKind::Free,
+                },
+            );
+            if let NodeKind::Dir(Children::Loaded(grandchildren)) = node.kind {
+                stack.extend(grandchildren);
+            }
+            self.approx_bytes -= node_bytes(&node.name);
+            self.free.push(child);
+            on_free(child);
+            freed += 1;
+        }
+        freed
+    }
+
+    /// Sorts the children of `id` and of every loaded directory under it by
+    /// size, largest first.
+    pub fn sort_subtree_by_size(&mut self, id: NodeId) {
+        let mut stack = vec![id];
+        while let Some(dir) = stack.pop() {
+            let Some(NodeKind::Dir(Children::Loaded(children))) =
+                self.nodes.get_mut(dir as usize).map(|node| &mut node.kind)
+            else {
+                continue;
+            };
+            let mut children = std::mem::take(children);
+            children.sort_by_key(|&child| std::cmp::Reverse(self.nodes[child as usize].size));
+            stack.extend(&children);
+            if let NodeKind::Dir(Children::Loaded(slot)) = &mut self.nodes[dir as usize].kind {
+                *slot = children;
+            }
         }
     }
 
-    /// Sorts every loaded directory's children by size, largest first.
-    pub fn sort_children_by_size(&mut self) {
-        let sizes: Vec<u64> = self.nodes.iter().map(|node| node.size).collect();
-        for node in &mut self.nodes {
-            if let NodeKind::Dir(Children::Loaded(children)) = &mut node.kind {
-                children.sort_by_key(|&id| std::cmp::Reverse(sizes[id as usize]));
-            }
-        }
+    /// Releases spare capacity in the node and free lists.
+    pub fn shrink_to_fit(&mut self) {
+        self.nodes.shrink_to_fit();
+        self.free.shrink_to_fit();
     }
 
     /// Rebuilds the full filesystem path of `id` from its ancestors' names.
@@ -282,11 +306,17 @@ impl Tree {
         let mut current = self.get(id)?;
         while let Some(parent) = current.parent {
             names.push(&*current.name);
-            current = &self.nodes[parent as usize];
+            current = self.get(parent)?;
         }
         let mut path = self.root_path.clone();
         path.extend(names.iter().rev());
         Some(path)
+    }
+
+    fn get_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.nodes
+            .get_mut(id as usize)
+            .filter(|node| !matches!(node.kind, NodeKind::Free))
     }
 }
 
@@ -300,6 +330,10 @@ fn node_bytes(name: &str) -> usize {
 mod tests {
     use super::*;
 
+    fn dir() -> NodeKind {
+        NodeKind::Dir(Children::Unloaded)
+    }
+
     /// root/
     /// ├── a.txt (10)
     /// └── sub/
@@ -307,37 +341,67 @@ mod tests {
     ///     └── deep/ (unloaded, 5)
     fn sample() -> (Tree, NodeId, NodeId, NodeId) {
         let mut tree = Tree::new(PathBuf::from("/data"));
-        let a = tree.add_child(Tree::ROOT, "a.txt", 10, false).unwrap();
-        let sub = tree.add_child(Tree::ROOT, "sub", 0, true).unwrap();
-        tree.add_child(sub, "b.txt", 100, false).unwrap();
-        let deep = tree.add_child(sub, "deep", 5, true).unwrap();
+        let a = tree
+            .add_child(Tree::ROOT, "a.txt", 10, NodeKind::File)
+            .unwrap();
+        let sub = tree.add_child(Tree::ROOT, "sub", 0, dir()).unwrap();
+        tree.add_child(sub, "b.txt", 100, NodeKind::File).unwrap();
+        let deep = tree.add_child(sub, "deep", 5, dir()).unwrap();
         (tree, a, sub, deep)
+    }
+
+    fn size(tree: &Tree, id: NodeId) -> u64 {
+        tree.get(id).unwrap().size
     }
 
     #[test]
     fn new_tree_is_an_unloaded_root() {
         let tree = Tree::new(PathBuf::from("/data"));
         assert_eq!(tree.node_count(), 1);
-        assert_eq!(tree.get(Tree::ROOT).unwrap().size, 0);
+        assert_eq!(size(&tree, Tree::ROOT), 0);
         assert!(tree.children(Tree::ROOT).is_none());
     }
 
     #[test]
     fn sizes_propagate_to_ancestors() {
         let (tree, _, sub, deep) = sample();
-        assert_eq!(tree.get(deep).unwrap().size, 5);
-        assert_eq!(tree.get(sub).unwrap().size, 105);
-        assert_eq!(tree.get(Tree::ROOT).unwrap().size, 115);
+        assert_eq!(size(&tree, deep), 5);
+        assert_eq!(size(&tree, sub), 105);
+        assert_eq!(size(&tree, Tree::ROOT), 115);
+    }
+
+    #[test]
+    fn add_size_and_clear_size_keep_ancestors_consistent() {
+        let (mut tree, _, sub, deep) = sample();
+        tree.add_size(deep, 20);
+        assert_eq!(size(&tree, deep), 25);
+        assert_eq!(size(&tree, Tree::ROOT), 135);
+
+        tree.clear_size(sub);
+        assert_eq!(size(&tree, sub), 0);
+        assert_eq!(size(&tree, Tree::ROOT), 10);
     }
 
     #[test]
     fn unloaded_directory_keeps_its_size_but_has_no_children() {
         let (tree, _, _, deep) = sample();
-        assert!(matches!(
+        assert_eq!(
             tree.get(deep).unwrap().kind,
             NodeKind::Dir(Children::Unloaded)
-        ));
+        );
         assert!(tree.children(deep).is_none());
+    }
+
+    #[test]
+    fn set_children_marks_unloaded_directories_only() {
+        let (mut tree, _, sub, deep) = sample();
+        tree.set_children(deep, Children::Unreadable);
+        assert_eq!(
+            tree.get(deep).unwrap().kind,
+            NodeKind::Dir(Children::Unreadable)
+        );
+        tree.set_children(sub, Children::Unreadable);
+        assert!(tree.children(sub).is_some(), "loaded dirs are untouched");
     }
 
     #[test]
@@ -350,16 +414,19 @@ mod tests {
     #[test]
     fn cannot_add_child_to_file() {
         let (mut tree, a, _, _) = sample();
-        assert!(tree.add_child(a, "x", 1, false).is_none());
+        assert!(tree.add_child(a, "x", 1, NodeKind::File).is_none());
         assert_eq!(tree.node_count(), 5);
     }
 
     #[test]
-    fn sort_orders_children_largest_first() {
-        let (mut tree, a, sub, _) = sample();
+    fn sort_orders_only_the_given_subtree_largest_first() {
+        let (mut tree, a, sub, deep) = sample();
+        let b = tree.children(sub).unwrap()[0];
+        tree.add_size(deep, 200);
+        tree.sort_subtree_by_size(sub);
+        assert_eq!(tree.children(sub), Some(&[deep, b][..]));
+        // The root's children weren't part of the sorted subtree.
         assert_eq!(tree.children(Tree::ROOT), Some(&[a, sub][..]));
-        tree.sort_children_by_size();
-        assert_eq!(tree.children(Tree::ROOT), Some(&[sub, a][..]));
     }
 
     #[test]
@@ -374,50 +441,56 @@ mod tests {
     fn approx_bytes_grows_with_nodes_and_names() {
         let mut tree = Tree::new(PathBuf::from("/data"));
         let before = tree.approx_bytes();
-        tree.add_child(Tree::ROOT, "name", 1, false).unwrap();
+        tree.add_child(Tree::ROOT, "name", 1, NodeKind::File)
+            .unwrap();
         let per_node = std::mem::size_of::<Node>() + std::mem::size_of::<NodeId>();
         assert_eq!(tree.approx_bytes(), before + per_node + "name".len());
     }
 
     #[test]
-    fn attach_flattens_subtree_and_propagates_its_total() {
-        let (mut tree, _, sub, _) = sample();
-        let branch = Subtree::dir(
-            "new",
-            vec![
-                Subtree::file("c.txt", 7),
-                Subtree::dir("inner", vec![Subtree::file("d.txt", 3)]),
-                Subtree::unloaded_dir("mnt", 0),
-            ],
-        );
+    fn evict_children_frees_the_subtree_but_keeps_sizes() {
+        let (mut tree, _, sub, deep) = sample();
+        let b = tree.children(sub).unwrap()[0];
         let before = tree.approx_bytes();
-        let new = tree.attach(sub, branch).unwrap();
 
-        assert_eq!(tree.get(new).unwrap().size, 10);
-        assert_eq!(tree.get(sub).unwrap().size, 115);
-        assert_eq!(tree.get(Tree::ROOT).unwrap().size, 125);
-        assert_eq!(tree.node_count(), 5 + 5);
+        let mut freed = Vec::new();
+        assert_eq!(tree.evict_children(sub, |id| freed.push(id)), 2);
+        freed.sort();
+        assert_eq!(freed, [b, deep]);
 
-        let children = tree.children(new).unwrap();
-        assert_eq!(children.len(), 3);
-        let inner = children[1];
-        let d = tree.children(inner).unwrap()[0];
         assert_eq!(
-            tree.path(d).unwrap(),
-            PathBuf::from("/data/sub/new/inner/d.txt")
+            tree.get(sub).unwrap().kind,
+            NodeKind::Dir(Children::Unloaded)
         );
-        assert!(tree.children(children[2]).is_none()); // "mnt" stays unloaded
-
-        let names = "newc.txtinnerd.txtmnt".len();
-        let per_node = std::mem::size_of::<Node>() + std::mem::size_of::<NodeId>();
-        assert_eq!(tree.approx_bytes(), before + 5 * per_node + names);
+        assert_eq!(size(&tree, sub), 105);
+        assert_eq!(size(&tree, Tree::ROOT), 115);
+        assert!(tree.get(b).is_none());
+        assert_eq!(tree.node_count(), 3);
+        assert_eq!(tree.iter().count(), 3);
+        assert!(tree.approx_bytes() < before);
     }
 
     #[test]
-    fn attach_to_file_is_rejected() {
-        let (mut tree, a, _, _) = sample();
-        assert!(tree.attach(a, Subtree::file("x", 1)).is_none());
+    fn freed_slots_are_reused() {
+        let (mut tree, a, sub, _) = sample();
+        tree.evict_children(sub, |_| {});
+        let len_before = tree.nodes.len();
+
+        let x = tree.add_child(a, "x", 1, NodeKind::File);
+        let y = tree.add_child(Tree::ROOT, "y", 1, NodeKind::File).unwrap();
+        let z = tree.add_child(Tree::ROOT, "z", 1, NodeKind::File).unwrap();
+        assert!(x.is_none(), "a.txt is a file");
+        assert_eq!(
+            tree.nodes.len(),
+            len_before,
+            "no growth while slots are free"
+        );
+        assert_eq!(tree.path(z).unwrap(), PathBuf::from("/data/z"));
+        assert_eq!(tree.path(y).unwrap(), PathBuf::from("/data/y"));
         assert_eq!(tree.node_count(), 5);
+
+        tree.add_child(Tree::ROOT, "w", 1, NodeKind::File).unwrap();
+        assert_eq!(tree.nodes.len(), len_before + 1);
     }
 
     #[test]

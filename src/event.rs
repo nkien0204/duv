@@ -54,8 +54,11 @@ impl EventHandler {
                         .checked_sub(last_tick.elapsed())
                         .unwrap_or(tick_rate);
 
+                    // A failed send means the receiver is gone: the app is
+                    // shutting down (e.g. still freeing a large scan after
+                    // leaving the TUI), so stop quietly instead of panicking.
                     if event::poll(timeout).expect("unable to poll for event") {
-                        match event::read().expect("unable to read event") {
+                        let sent = match event::read().expect("unable to read event") {
                             CrosstermEvent::Key(e) => {
                                 if e.kind == event::KeyEventKind::Press {
                                     sender.send(Event::Key(e))
@@ -65,13 +68,18 @@ impl EventHandler {
                             }
                             CrosstermEvent::Mouse(e) => sender.send(Event::Mouse(e)),
                             CrosstermEvent::Resize(w, h) => sender.send(Event::Resize(w, h)),
-                            _ => unimplemented!(),
+                            // Focus and paste events aren't used.
+                            _ => Ok(()),
+                        };
+                        if sent.is_err() {
+                            break;
                         }
-                        .expect("failed to send terminal event")
                     }
 
                     if last_tick.elapsed() >= tick_rate {
-                        sender.send(Event::Tick).expect("failed to send tick event");
+                        if sender.send(Event::Tick).is_err() {
+                            break;
+                        }
                         last_tick = Instant::now();
                     }
                 }

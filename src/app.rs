@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use crate::disks::{self, DiskInfo};
-use crate::scanner::{Enter, Scanner};
+use crate::scanner::{self, Enter, Scanner};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitOption {
@@ -39,6 +39,8 @@ pub struct App {
     /// whose contents weren't collected (another filesystem, or
     /// unreadable), or rescanning a subdirectory with `s`.
     pub scanner_history: Vec<Scanner>,
+    /// Memory budget for each scan's tree, in bytes (see `scanner.rs`).
+    pub memory_budget: usize,
     /// Set if the most recent scan attempt failed to even list its root
     /// directory (e.g. a permissions error), so the UI can surface it.
     pub scanner_error: Option<String>,
@@ -54,22 +56,27 @@ impl Default for App {
             disks_table_state: ratatui::widgets::TableState::default().with_selected(Some(0)),
             scanner: None,
             scanner_history: Vec::new(),
+            memory_budget: scanner::DEFAULT_MEMORY_BUDGET,
             scanner_error: None,
         }
     }
 }
 
 impl App {
-    /// Constructs a new instance of [`App`].
-    pub fn new() -> Self {
-        Self::default()
+    /// Constructs an [`App`] showing the disk list, whose scans keep their
+    /// trees within `memory_budget` bytes.
+    pub fn new(memory_budget: usize) -> Self {
+        Self {
+            memory_budget,
+            ..Self::default()
+        }
     }
 
     /// Constructs an [`App`] that immediately scans `root` instead of
     /// showing the disk list. Backing out of that scan returns to the
     /// disk list.
-    pub fn with_start_path(root: PathBuf) -> Self {
-        let mut app = Self::default();
+    pub fn with_start_path(root: PathBuf, memory_budget: usize) -> Self {
+        let mut app = Self::new(memory_budget);
         app.spawn_scan(root);
         app
     }
@@ -174,7 +181,7 @@ impl App {
     /// Spawns a scan of `root`, replacing the current scanner (on success)
     /// or surfacing an error (on failure).
     fn spawn_scan(&mut self, root: PathBuf) {
-        match Scanner::spawn(root) {
+        match Scanner::spawn(root, self.memory_budget) {
             Ok(scanner) => {
                 self.scanner = Some(scanner);
                 self.scanner_error = None;
@@ -214,7 +221,7 @@ mod tests {
         fs::create_dir_all(dir.join("sub").join("deeper")).unwrap();
         fs::write(dir.join("sub").join("deeper").join("c.txt"), [0u8; 10_000]).unwrap();
 
-        let mut app = App::with_start_path(dir.clone());
+        let mut app = App::with_start_path(dir.clone(), scanner::DEFAULT_MEMORY_BUDGET);
         wait_until_finished(&mut app);
 
         app.enter_selected();
@@ -241,7 +248,7 @@ mod tests {
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("sub").join("a.txt"), b"a").unwrap();
 
-        let mut app = App::with_start_path(dir.clone());
+        let mut app = App::with_start_path(dir.clone(), scanner::DEFAULT_MEMORY_BUDGET);
         wait_until_finished(&mut app);
         app.enter_selected();
         assert_eq!(current_path(&app), dir.join("sub"));

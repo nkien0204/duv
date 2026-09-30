@@ -5,8 +5,8 @@ contributors (human or AI agent) who need to know _where_ to add new
 functionality and _how_ the pieces communicate.
 
 > **Status:** early development. Disk enumeration, directory scanning into
-> an in-memory tree, and drill-down navigation of that tree exist. No
-> delete/manage actions or memory budget yet. This document describes the
+> a memory-budgeted in-memory tree, and drill-down navigation of that tree
+> exist. No delete/manage actions yet. This document describes the
 > current skeleton and the conventions to extend it, not a finished
 > product.
 
@@ -28,10 +28,10 @@ flowchart LR
     DISKS[disks.rs\nlist&#40;&#41;] -- populates --> APP
     UPD -- start_scan&#40;&#41; / enter_selected&#40;&#41; --> SCAN
     subgraph bg2[Scan thread pool]
-        WALK[scanner.rs\nwalk → Subtree]
+        WALK[scanner.rs\nwalk&#40;&#41;]
     end
-    WALK -- mpsc channel --> SCAN[scanner.rs\nScanner]
-    SCAN -- attach&#40;&#41; --> TREE[model.rs\nTree]
+    WALK -- one listing per directory --> SCAN[scanner.rs\nScanner]
+    SCAN -- add / fold / evict --> TREE[model.rs\nTree]
     APP -- owns --> SCAN
     APP -- scanner_history --> APP
     MAIN -- Event::Tick --> APP
@@ -52,6 +52,10 @@ shell error. With `Some(path)`, `main` builds the app with
 `App::with_start_path`, which begins scanning that directory immediately;
 with `None` it uses `App::new()` and opens on the disk list.
 
+`--memory-budget <MIB>` (default 256, from `scanner::DEFAULT_MEMORY_BUDGET`)
+sets each scan's tree budget; see `scanner.rs`. The hidden `--stats` flag
+runs `stats.rs` instead of the TUI.
+
 ### `app.rs` — Model
 
 Holds all application state: `should_quit`, whether to show a quit confirmation
@@ -60,9 +64,10 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
 (`selected: usize`), and the drill-down navigation state:
 
 - `scanner: Option<scanner::Scanner>` — the currently displayed scan.
-  `None` means the disk list is showing. A `Scanner` holds the whole tree
-  under its root, so drilling into subdirectories and back out happens
-  inside it (`Scanner::enter_selected`/`Scanner::go_up`) with no I/O.
+  `None` means the disk list is showing. A `Scanner` holds the tree under
+  its root, so drilling into subdirectories and back out happens inside
+  it (`Scanner::enter_selected`/`Scanner::go_up`) — with no I/O, or by
+  loading a directory in place if it was left out to stay within budget.
 - `scanner_history: Vec<scanner::Scanner>` — earlier scans to restore when
   backing out past the current scanner's root. It only grows when the
   tree can't answer: opening a directory whose contents weren't collected
@@ -71,6 +76,7 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
   scan (moved up to the parent) is kept here. `go_back()` first moves up
   within the current scanner, then pops this stack, then falls back to
   the disk list.
+- `memory_budget: usize` — passed to every `Scanner` it spawns.
 - `scanner_error: Option<String>` — set if the most recent scan attempt
   failed to even list its root directory (e.g. a permissions error).
 
@@ -85,81 +91,118 @@ directly, going through `disks::DiskInfo` instead (see below).
 mounted disk/volume visible to the OS (handling the case where a machine
 has more than one disk). `DiskInfo` and `DiskKind` are plain, crate-local
 types — not re-exports of `sysinfo`'s — so the `sysinfo` dependency stays
-isolated to this one module and `App` never has to know about it. This is
-the first step toward letting the user pick which disk/volume to scan;
-`App::new()` currently populates `disks` once at startup via `disks::list()`.
+i### `model.rs` — in-memory tree
 
-Also home to `format_bytes()`, a small binary-unit (`KiB`/`MiB`/...)
-human-readable size formatter used by `ui.rs`.
-
-### `model.rs` — in-memory tree
-
-`Tree` stores every scanned file and directory in one flat `Vec<Node>`,
+`Tree` stores scanned files and directories in one flat `Vec<Node>`,
 addressed by `NodeId` (a `u32` index); nodes point to their parent and
 children by id rather than through nested allocations. Each `Node` keeps
 only its own name (`Box<str>`), its size, its parent, and its kind — full
 paths are rebuilt on demand by `Tree::path`, so no `PathBuf` is stored per
 node. A test guards `Node` at 64 bytes or less.
 
-A directory's children are either `Children::Loaded(Vec<NodeId>)` or
-`Children::Unloaded`. An unloaded directory still has an accurate `size`;
-its entries just aren't in memory. Today that's used for directories on
-another filesystem and unreadable ones; it's also the hook for a future
-memory budget that evicts rarely visited branches without changing any
-totals.
+A directory's `Children` say whether its entries are in memory:
+
+- `Loaded(Vec<NodeId>)` — they are.
+- `Unloaded` — they aren't (not listed yet, skipped to stay within the
+  memory budget, or evicted), but `size` is still the exact total. The
+  scanner can load them in place later.
+- `OtherFilesystem` — a mount point of another filesystem; size `0`,
+  never loaded into this tree.
+- `Unreadable` — couldn't be listed.
 
 The invariant is that a loaded directory's `size` is the sum of its
-children's. `Tree::add_child` and `Tree::attach` keep it by adding each new
-node's size to all of its ancestors. `Subtree` is a temporary nested form
-of one branch, built by the scanner's parallel walk (whose threads can't
-share one `Tree`) and flattened into the tree in a single pass by
-`Tree::attach`. `Tree::approx_bytes()` keeps a running estimate of the
-tree's memory use, and `Tree::sort_children_by_size` orders every loaded
-directory largest first.
+children's; `add_child`, `add_size` and `clear_size` keep it by applying
+every change to all ancestors. `evict_children` drops everything under a
+directory (marking it `Unloaded`, sizes unchanged) and turns those nodes
+into `NodeKind::Free` slots, which `add_child` reuses before growing the
+list — so memory really stops growing at the budget. `get` never returns
+free slots. `approx_bytes()` keeps a running estimate of live nodes'
+memory, which is what the budget is measured against;
+`sort_subtree_by_size` orders a directory and everything under it largest
+first, and `shrink_to_fit` releases spare capacity after a scan.
 
-### `scanner.rs` — scanning and in-scan navigation
+### `scanner.rs` — scanning, memory budget and in-scan navigation
 
-`Scanner::spawn(root: PathBuf) -> io::Result<Scanner>` walks everything
+`Scanner::spawn(root, budget) -> io::Result<Scanner>` walks everything
 under `root` — a disk's mount point, or any directory given on the command
 line or opened from the UI — and records it in a `model::Tree`
-(`Scanner::tree`).
+(`Scanner::tree`), keeping `tree.approx_bytes()` within `budget`.
 
 Listing `root` itself happens synchronously (cheap, single `read_dir`), so
-the returned `Scanner` immediately knows `total`. Each first-level child is
-then walked on a background thread, parallelized across subdirectories with
-`rayon` (`ParallelBridge`/`into_par_iter`), into a `Subtree`, which is sent
-over an `mpsc::channel<Subtree>`.
+a failure to read it is returned immediately and its entries are in the
+tree right away. Its subdirectories are then walked on a background thread,
+parallelized with `rayon` (`into_par_iter` across subdirectories,
+`ParallelBridge` across one directory's entries). The walk sends one
+`Msg::Listed` per directory with just its direct entries; subdirectories
+are identified by tokens it hands out, which `Scanner::pending` maps to
+tree nodes as their parents' listings arrive. Streaming per directory
+(rather than building whole branches off-tree first) avoids holding a
+second copy of large branches during the scan. `Msg::BranchDone` per
+first-level subdirectory drives the progress gauge (`measured`/`total`).
 
-`Scanner::poll()` is non-blocking — it grafts whatever's arrived into the
-tree with `Tree::attach`, and sorts the tree by size once, on the tick the
-scan finishes — and is called from `App::tick()` on every `Event::Tick`
-(see `event.rs`).
+`Scanner::poll()` is non-blocking — it applies whatever has arrived, and
+sorts the scanned directory's subtree by size once the walk ends — and is
+called from `App::tick()` on every `Event::Tick` (see `event.rs`).
 
-Once finished, the `Scanner` is also the navigator for its tree. It tracks
-the directory being shown, its `selected` row and ratatui `table_state`,
-and a stack of parent views. `enter_selected()` returns
-`Enter::Entered` (moved into a loaded directory, no I/O),
-`Enter::NeedsScan(path)` (the directory is unloaded, so `App` spawns a
-new `Scanner` there), or `Enter::Ignored` (a file, or the scan isn't
-finished). `go_up()` restores the parent view, including its selection and
-scroll position. `current_path()`, `entries()` and `entry_count()` give the
-UI what to show.
+**Memory budget.** When a listing arrives while the tree is over budget,
+its entries aren't stored: their sizes are added to the directory, which
+stays `Unloaded`, and its subdirectories' listings are folded into it the
+same way. The directory being scanned itself is always stored, so the
+view you're looking at is complete; totals are exact at any budget.
+Opening an `Unloaded` directory loads it in place (`Enter::Loading`): if
+the tree is above three quarters of the budget, the entries of loaded
+directories hanging off the current path are evicted first, least
+recently visited first (`last_visit`; showing a directory also counts as
+visiting its ancestors), and never the current path itself. The budget is
+measured by `approx_bytes()`, which excludes allocator overhead and
+transient memory; peak RSS was about 1.5× the tree estimate with no
+folding, plus roughly 50 MB with tight budgets (see `stats.rs`).
+
+Once a scan finishes, the `Scanner` is also the navigator for its tree. It
+tracks the directory being shown, its `selected` row and ratatui
+`table_state`, and a stack of parent views. `enter_selected()` returns
+`Enter::Entered` (a loaded directory, no I/O), `Enter::Loading` (an
+unloaded directory, now being scanned into the tree; `finished` is
+`false` until done), `Enter::NeedsScan(path)` (another filesystem or
+unreadable, so `App` spawns a new `Scanner` there), or `Enter::Ignored` (a
+file, or a scan is running). `go_up()` restores the parent view, including
+its selection and scroll position. `current_path()`, `entries()` and
+`entry_count()` give the UI what to show.
 
 Symlinks are never followed (avoids cycles and double-counting), and
 recursion never crosses filesystem boundaries (like `du -x`/
 `--one-file-system`): a subdirectory that's the mount point of a different
-filesystem than `root` becomes an unloaded, zero-sized node instead of
-being summed in. Without this, walking e.g. `/` on macOS would also sum in
-`/System/Volumes/Data`, anything mounted under `/Volumes`, network shares,
-etc., wildly inflating totals past the disk's actual capacity. Errors on a
-given entry are swallowed rather than failing the whole scan; a directory
-that can't be listed becomes an unloaded, zero-sized node, so opening it
+filesystem than `root` becomes an `OtherFilesystem` node of size `0`
+instead of being summed in. Without this, walking e.g. `/` on macOS would
+also sum in `/System/Volumes/Data`, anything mounted under `/Volumes`,
+network shares, etc., wildly inflating totals past the disk's actual
+capacity. Errors on a given entry are swallowed rather than failing the
+whole scan; a directory that can't be listed becomes `Unreadable`, so
+opening it tries a fresh scan that reports the error. Only a failure to
+list a scan's own `root` surfaces as `App::scanner_error`. Hard-linked
+files are currently counted once per link, so totals can exceed `du`'s.
+
+This module has real filesystem-backed tests (per `AGENTS.md`'s stated
+preference for scanning logic), not mocked ones, including folding,
+loading in place and least-recently-visited eviction.
+
+so opening it
 tries a fresh scan that reports the error. Only a failure to list a
 scan's own `root` surfaces as `App::scanner_error`. Hard-linked files are
 currently counted once per link, so totals can exceed `du`'s.
 
 This module has real filesystem-backed tests (per `AGENTS.md`'s stated
 preference for scanning logic), not mocked ones.
+
+### `stats.rs` — headless scan statistics (developer tool)
+
+Behind the hidden `--stats` flag (`duv --stats [--memory-budget <MIB>]
+<path>`, not shown in `--help`): runs a `Scanner` to completion without
+the TUI and prints scan time, node counts, how many directories weren't
+loaded and why, the budget, `Tree::approx_bytes()`, unused node-list
+capacity, the largest first-level branch, and the process's peak resident
+memory (via `getrusage`). Used to measure what scans cost and to check
+the budget holds. Use a release build for meaningful numbers.
 
 ### `event.rs` — input source
 
@@ -218,9 +261,10 @@ rendering types. Dispatches on `App` state to one of three views:
   filesystem, used/available/total space via `disks::format_bytes`),
   highlighting the row at `app.selected` and auto-scrolling to keep it in
   view once the list is taller than the terminal.
-- A scan in progress (`app.scanner` is `Some` and not finished) — a `Gauge`
-  progress bar (with a border) showing `scanner.measured / scanner.total`
-  first-level entries.
+- A scan or in-place load in progress (`app.scanner` is `Some` and not
+  finished) — a `Gauge` progress bar (with a border) showing
+  `scanner.measured / scanner.total` subdirectories of the directory being
+  scanned, over the entries found so far.
 - A finished scan — a `Table` of `scanner.entries()` for the directory
   currently shown (name, Dir/File, size), sorted by size descending and
   titled with `scanner.current_path()`, rendered statefully with
@@ -274,6 +318,8 @@ tui.exit()?;
   per `AGENTS.md`'s lightweight-dependency convention.
 - **`clap`** (`derive` plus minimal features, no colour/suggestions) —
   argument parsing in `cli.rs`.
+- **`libc`** (Unix only) — `getrusage` for peak memory in `stats.rs`.
+  Already in the dependency tree via `crossterm`, so it adds no new crates.
 - **`rayon`** — work-stealing parallelism for recursively sizing
   directories in `scanner.rs`. This is the core value proposition of a
   "fast" disk usage tool, so parallelizing the I/O-bound directory walk
@@ -284,9 +330,6 @@ tui.exit()?;
 
 Not yet implemented; will slot into the modules above as they land:
 
-- **Memory budget** — cap `Tree::approx_bytes()` and evict the children of
-  the least recently visited directories (marking them `Unloaded`) when
-  it's exceeded, never the directory being shown or its ancestors.
 - **Delete/manage actions** — acting on a selected entry (delete, reveal in
   Finder/file manager, etc.).
 

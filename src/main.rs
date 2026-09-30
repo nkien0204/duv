@@ -13,7 +13,10 @@ pub mod event;
 /// In-memory tree of scanned paths and sizes.
 pub mod model;
 
-/// First-level directory-size scanning.
+/// Headless scan statistics (`--stats`).
+pub mod stats;
+
+/// Directory-size scanning and in-scan navigation.
 pub mod scanner;
 
 /// Widget renderer.
@@ -39,10 +42,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let start_path = cli.start_path().map_err(anyhow::Error::msg)?;
 
+    if cli.stats
+        && let Some(path) = start_path
+    {
+        return stats::run(path, cli.memory_budget_bytes());
+    }
+
     // Create an application.
     let mut app = match start_path {
-        Some(path) => App::with_start_path(path),
-        None => App::new(),
+        Some(path) => App::with_start_path(path, cli.memory_budget_bytes()),
+        None => App::new(cli.memory_budget_bytes()),
     };
 
     // Initialize the terminal user interface.
