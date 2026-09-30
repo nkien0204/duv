@@ -39,7 +39,10 @@ cargo build --release
 duv [path]
 ```
 
-Runs `duv` against the given path (defaults to the current directory).
+Without arguments, `duv` opens on the list of mounted disks. With a path
+(e.g. `duv .` for the current directory), it starts by scanning that
+directory; pressing `h`/`Esc` from there goes back to the disk list. Also
+supports `--help` and `--version`.
 
 ## Controls
 

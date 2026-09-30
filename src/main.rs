@@ -1,6 +1,9 @@
 /// Application.
 pub mod app;
 
+/// Command-line argument parsing.
+pub mod cli;
+
 /// Disk/volume enumeration.
 pub mod disks;
 
@@ -21,14 +24,23 @@ pub mod update;
 
 use anyhow::Result;
 use app::App;
+use clap::Parser;
+use cli::Cli;
 use event::{Event, EventHandler};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tui::Tui;
 use update::update;
 
 fn main() -> Result<()> {
+    // Parse and validate arguments before touching the terminal.
+    let cli = Cli::parse();
+    let start_path = cli.start_path().map_err(anyhow::Error::msg)?;
+
     // Create an application.
-    let mut app = App::new();
+    let mut app = match start_path {
+        Some(path) => App::with_start_path(path),
+        None => App::new(),
+    };
 
     // Initialize the terminal user interface.
     let backend = CrosstermBackend::new(std::io::stderr());

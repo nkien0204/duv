@@ -18,7 +18,9 @@ before assuming something exists.
 ## Current state
 
 The terminal shell follows a Model-Update-View split across five modules
-(`app`, `event`, `update`, `ui`, `tui`) plus a thin `main.rs`. A `disks`
+(`app`, `event`, `update`, `ui`, `tui`) plus a thin `main.rs` and a `cli`
+module (`duv [path]`: with a path, e.g. `duv .`, `App::with_start_path` scans it
+immediately; without one, the disk list shows). A `disks`
 module enumerates mounted disks/volumes (via `sysinfo`), feeding `App` a
 plain, crate-local `DiskInfo` list that `ui` renders as a selectable table.
 Pressing `s` on a selected disk triggers `scanner::Scanner`, which measures the
@@ -36,7 +38,8 @@ that document up to date alongside this one whenever the module structure
 changes.
 
 - Dependencies: `ratatui` (pulls in the `crossterm` backend by default),
-  `anyhow` (error propagation), `sysinfo` (disk/volume enumeration only,
+  `anyhow` (error propagation), `clap` (`duv [path]` parsing in `src/cli.rs`,
+  minimal feature set), `sysinfo` (disk/volume enumeration only,
   via `default-features = false, features = ["disk"]`), `rayon`
   (parallel directory-size scanning).
 - Disk enumeration (`src/disks.rs`) and one-level-at-a-time directory-size
@@ -56,7 +59,7 @@ As the project grows, prefer organizing code by responsibility, e.g.:
 - `ui` — terminal UI rendering and input handling. **Decided:** `ratatui`
   (with its default `crossterm` backend) — see below for rationale.
 - `app` — application state/event loop tying scanner + model + ui together.
-- `cli` — argument parsing (likely `clap`) and entry point in `main.rs`.
+- `cli` — argument parsing (`clap`); implemented in `src/cli.rs`.
 
 Don't create this structure preemptively — introduce modules as real
 functionality is added, and keep `main.rs` thin.
