@@ -4,11 +4,11 @@ This document describes how `duv`'s code is organized and why. It's aimed at
 contributors (human or AI agent) who need to know _where_ to add new
 functionality and _how_ the pieces communicate.
 
-> **Status:** early development. Disk enumeration and directory scanning
-> exist, including drill-down navigation into subdirectories. No full
-> in-memory tree model or delete/manage actions yet. This document
-> describes the current skeleton and the conventions to extend it, not a
-> finished product.
+> **Status:** early development. Disk enumeration, directory scanning into
+> an in-memory tree, and drill-down navigation of that tree exist. No
+> delete/manage actions or memory budget yet. This document describes the
+> current skeleton and the conventions to extend it, not a finished
+> product.
 
 ## Overview: Model – Update – View
 
@@ -28,9 +28,11 @@ flowchart LR
     DISKS[disks.rs\nlist&#40;&#41;] -- populates --> APP
     UPD -- start_scan&#40;&#41; / enter_selected&#40;&#41; --> SCAN
     subgraph bg2[Scan thread pool]
-        SCAN[scanner.rs\nScanner]
+        WALK[scanner.rs\nwalk → Subtree]
     end
-    SCAN -- mpsc channel --> APP
+    WALK -- mpsc channel --> SCAN[scanner.rs\nScanner]
+    SCAN -- attach&#40;&#41; --> TREE[model.rs\nTree]
+    APP -- owns --> SCAN
     APP -- scanner_history --> APP
     MAIN -- Event::Tick --> APP
     MAIN -- draw --> TUI[tui.rs\nTui]
@@ -42,13 +44,13 @@ flowchart LR
 
 ### `cli.rs` — argument parsing
 
-`Cli` (derived with `clap`) models `duv [path]`; `path` is optional (`duv .` scans the current
-directory). `Cli::start_path()`
-canonicalizes the path and rejects missing or non-directory paths; `main.rs`
-calls it before the terminal enters raw mode, so bad input produces an
-ordinary shell error. With `Some(path)`, `main` builds the app with `App::with_start_path`,
-which begins scanning that directory immediately; with `None` it uses
-`App::new()` and opens on the disk list.
+`Cli` (derived with `clap`) models `duv [path]`; `path` is optional
+(`duv .` scans the current directory). `Cli::start_path()` canonicalizes
+the path and rejects missing or non-directory paths; `main.rs` calls it
+before the terminal enters raw mode, so bad input produces an ordinary
+shell error. With `Some(path)`, `main` builds the app with
+`App::with_start_path`, which begins scanning that directory immediately;
+with `None` it uses `App::new()` and opens on the disk list.
 
 ### `app.rs` — Model
 
@@ -57,14 +59,18 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
 (`disks: Vec<disks::DiskInfo>`), the currently highlighted disk row
 (`selected: usize`), and the drill-down navigation state:
 
-- `scanner: Option<scanner::Scanner>` — the currently displayed scan (disk
-  root or any subdirectory drilled into). `None` means the disk list is
-  showing.
-- `scanner_history: Vec<scanner::Scanner>` — completed parent scans to
-  restore when backing out, so going up a level doesn't require
-  re-scanning it. Together with `scanner` this is the navigation stack:
-  `enter_selected()` pushes the current scanner here and spawns a new one
-  rooted at the selected subdirectory; `go_back()` pops it back.
+- `scanner: Option<scanner::Scanner>` — the currently displayed scan.
+  `None` means the disk list is showing. A `Scanner` holds the whole tree
+  under its root, so drilling into subdirectories and back out happens
+  inside it (`Scanner::enter_selected`/`Scanner::go_up`) with no I/O.
+- `scanner_history: Vec<scanner::Scanner>` — earlier scans to restore when
+  backing out past the current scanner's root. It only grows when the
+  tree can't answer: opening a directory whose contents weren't collected
+  (another filesystem, or unreadable) spawns a fresh `Scanner` there, and
+  `s` in a subdirectory rescans just that directory while the previous
+  scan (moved up to the parent) is kept here. `go_back()` first moves up
+  within the current scanner, then pops this stack, then falls back to
+  the disk list.
 - `scanner_error: Option<String>` — set if the most recent scan attempt
   failed to even list its root directory (e.g. a permissions error).
 
@@ -86,41 +92,71 @@ the first step toward letting the user pick which disk/volume to scan;
 Also home to `format_bytes()`, a small binary-unit (`KiB`/`MiB`/...)
 human-readable size formatter used by `ui.rs`.
 
-### `scanner.rs` — directory-size scanning (one level at a time)
+### `model.rs` — in-memory tree
 
-`Scanner::spawn(root: PathBuf) -> io::Result<Scanner>` measures the total
-on-disk size of every immediate child of `root` — a disk's mount point, or
-any directory the user has drilled into. A `Scanner` only ever measures
-one level; going deeper means spawning another `Scanner` rooted at the
-selected subdirectory (see `App::enter_selected`), which is why the same
-type serves both the initial disk-level scan and every subsequent
-drill-down, rather than having separate "top-level scan" and "subdirectory
-scan" code paths.
+`Tree` stores every scanned file and directory in one flat `Vec<Node>`,
+addressed by `NodeId` (a `u32` index); nodes point to their parent and
+children by id rather than through nested allocations. Each `Node` keeps
+only its own name (`Box<str>`), its size, its parent, and its kind — full
+paths are rebuilt on demand by `Tree::path`, so no `PathBuf` is stored per
+node. A test guards `Node` at 64 bytes or less.
+
+A directory's children are either `Children::Loaded(Vec<NodeId>)` or
+`Children::Unloaded`. An unloaded directory still has an accurate `size`;
+its entries just aren't in memory. Today that's used for directories on
+another filesystem and unreadable ones; it's also the hook for a future
+memory budget that evicts rarely visited branches without changing any
+totals.
+
+The invariant is that a loaded directory's `size` is the sum of its
+children's. `Tree::add_child` and `Tree::attach` keep it by adding each new
+node's size to all of its ancestors. `Subtree` is a temporary nested form
+of one branch, built by the scanner's parallel walk (whose threads can't
+share one `Tree`) and flattened into the tree in a single pass by
+`Tree::attach`. `Tree::approx_bytes()` keeps a running estimate of the
+tree's memory use, and `Tree::sort_children_by_size` orders every loaded
+directory largest first.
+
+### `scanner.rs` — scanning and in-scan navigation
+
+`Scanner::spawn(root: PathBuf) -> io::Result<Scanner>` walks everything
+under `root` — a disk's mount point, or any directory given on the command
+line or opened from the UI — and records it in a `model::Tree`
+(`Scanner::tree`).
 
 Listing `root` itself happens synchronously (cheap, single `read_dir`), so
-the returned `Scanner` immediately knows `total`; the expensive recursive
-sizing of each child then runs on a background thread, parallelized across
-subdirectories with `rayon` (`ParallelBridge`/`into_par_iter`), and streamed
-back to the caller over an `mpsc::channel<ScanEntry>`.
+the returned `Scanner` immediately knows `total`. Each first-level child is
+then walked on a background thread, parallelized across subdirectories with
+`rayon` (`ParallelBridge`/`into_par_iter`), into a `Subtree`, which is sent
+over an `mpsc::channel<Subtree>`.
 
-`Scanner::poll()` is non-blocking — it drains whatever's arrived on the
-channel so far, and sorts `entries` by size descending once every entry has
-arrived — and is called from `App::tick()` on every `Event::Tick` (see
-`event.rs`), which is exactly the use `Event::Tick`'s doc comment already
-anticipated. `Scanner` also tracks its own row `selected` index and a
-ratatui `table_state` (kept in sync by `select_next`/`select_previous`/
-`selected_entry`), so each level of the navigation stack remembers both
-its highlighted row and its table scroll position across drill-down/back
-navigation (see `ui.rs`). Symlinks are never followed (avoids cycles and
-double-counting), and recursion never crosses filesystem boundaries (like
-`du -x`/`--one-file-system`): a subdirectory that's the mount point of a
-different filesystem than `root` contributes `0` instead of being summed
-in. Without this, walking e.g. `/` on macOS would also sum in
+`Scanner::poll()` is non-blocking — it grafts whatever's arrived into the
+tree with `Tree::attach`, and sorts the tree by size once, on the tick the
+scan finishes — and is called from `App::tick()` on every `Event::Tick`
+(see `event.rs`).
+
+Once finished, the `Scanner` is also the navigator for its tree. It tracks
+the directory being shown, its `selected` row and ratatui `table_state`,
+and a stack of parent views. `enter_selected()` returns
+`Enter::Entered` (moved into a loaded directory, no I/O),
+`Enter::NeedsScan(path)` (the directory is unloaded, so `App` spawns a
+new `Scanner` there), or `Enter::Ignored` (a file, or the scan isn't
+finished). `go_up()` restores the parent view, including its selection and
+scroll position. `current_path()`, `entries()` and `entry_count()` give the
+UI what to show.
+
+Symlinks are never followed (avoids cycles and double-counting), and
+recursion never crosses filesystem boundaries (like `du -x`/
+`--one-file-system`): a subdirectory that's the mount point of a different
+filesystem than `root` becomes an unloaded, zero-sized node instead of
+being summed in. Without this, walking e.g. `/` on macOS would also sum in
 `/System/Volumes/Data`, anything mounted under `/Volumes`, network shares,
-etc., wildly inflating totals past the disk's actual capacity. Permission
-errors on a given entry are swallowed (that entry just contributes `0`)
-rather than failing the whole scan; only a failure to list `root` itself
-surfaces as `App::scanner_error`.
+etc., wildly inflating totals past the disk's actual capacity. Errors on a
+given entry are swallowed rather than failing the whole scan; a directory
+that can't be listed becomes an unloaded, zero-sized node, so opening it
+tries a fresh scan that reports the error. Only a failure to list a
+scan's own `root` surfaces as `App::scanner_error`. Hard-linked files are
+currently counted once per link, so totals can exceed `du`'s.
 
 This module has real filesystem-backed tests (per `AGENTS.md`'s stated
 preference for scanning logic), not mocked ones.
@@ -152,15 +188,17 @@ both interaction styles are supported simultaneously. Currently handles:
   open; triggers quit confirmation otherwise. This lets `Esc` act as "back" before it acts as
   "quit."
 - `h` / `Left` / `Backspace` — same as `Esc`, but only when there's
-  somewhere to go back to (no-op on the disk list).
+  somewhere to go back to (no-op on the disk list). Going back moves up
+  within the current scan's tree before leaving it.
 - `j`/`Down`, `k`/`Up` — move the disk-list selection when no scan is
   open, or the current scan's row selection once it's finished
   (`App::select_next`/`App::select_previous` vs. `Scanner::select_next`/
   `Scanner::select_previous`).
 - `l` / `Right` / `Enter` — drill into the selected entry if it's a
-  directory (`App::enter_selected`).
+  directory (`App::enter_selected`), straight from the tree when its
+  contents are loaded.
 - `s` — start a scan of the selected disk's mount point, or re-scan the
-  current directory if one's already open (`App::start_scan`).
+  directory currently shown if a scan is open (`App::start_scan`).
 
 Future additions (`gg`/`G`, `Home`/`End`, etc.) belong here too.
 
@@ -181,10 +219,13 @@ rendering types. Dispatches on `App` state to one of three views:
   highlighting the row at `app.selected` and auto-scrolling to keep it in
   view once the list is taller than the terminal.
 - A scan in progress (`app.scanner` is `Some` and not finished) — a `Gauge`
-  progress bar (with a border) showing `entries measured / total`.
-- A finished scan — a `Table` of `scanner.entries` (name, Dir/File, size),
-  sorted by size descending, rendered statefully with `scanner.table_state`
-  (same highlighting/auto-scroll behavior as the disk table).
+  progress bar (with a border) showing `scanner.measured / scanner.total`
+  first-level entries.
+- A finished scan — a `Table` of `scanner.entries()` for the directory
+  currently shown (name, Dir/File, size), sorted by size descending and
+  titled with `scanner.current_path()`, rendered statefully with
+  `scanner.table_state` (same highlighting/auto-scroll behavior as the
+  disk table).
 - `app.scanner_error` set — an error `Paragraph` instead of any of the
   above.
 - `app.quit_confirmation` set — a centered modal popup asking the user to
@@ -243,10 +284,9 @@ tui.exit()?;
 
 Not yet implemented; will slot into the modules above as they land:
 
-- **`model`** — a persistent, in-memory tree representation of every level
-  scanned so far (currently, only the navigation stack of `Scanner`s is
-  kept — going back re-uses a completed scan, but nothing is cached beyond
-  that path).
+- **Memory budget** — cap `Tree::approx_bytes()` and evict the children of
+  the least recently visited directories (marking them `Unloaded`) when
+  it's exceeded, never the directory being shown or its ancestors.
 - **Delete/manage actions** — acting on a selected entry (delete, reveal in
   Finder/file manager, etc.).
 

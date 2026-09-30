@@ -1,18 +1,19 @@
-//! First-level directory-size scanning.
+//! Directory-size scanning and in-scan navigation.
 //!
-//! Given a root path (a disk's mount point, or any directory the user has
-//! drilled into), walks its immediate children and computes the total
-//! on-disk size of each one — recursing into subdirectories with `rayon`
-//! so multiple branches of the tree are measured in parallel. Runs on a
-//! background thread and reports progress through an `mpsc` channel,
-//! polled from `App::tick()` (driven by `Event::Tick`) so the UI thread is
-//! never blocked waiting on I/O.
+//! Given a root path (a disk's mount point, or any directory the user
+//! opened), walks everything under it — recursing into subdirectories
+//! with `rayon` so multiple branches are measured in parallel — and
+//! records every file and directory in a [`Tree`] (`Scanner::tree`). Runs
+//! on a background thread: each first-level child is walked into a
+//! [`Subtree`], sent through an `mpsc` channel, and grafted into the tree
+//! by `poll`, which `App::tick()` calls on every `Event::Tick` so the UI
+//! thread is never blocked waiting on I/O.
 //!
-//! A [`Scanner`] only ever measures one level of a directory tree at a
-//! time. Drilling further into a subdirectory means spawning another
-//! [`Scanner`] rooted there — see `App::enter_selected` and
-//! `App::scanner_history`, which keep completed parent scans around so
-//! backing out doesn't require re-scanning them.
+//! Once finished, drilling into a subdirectory and backing out
+//! (`Scanner::enter_selected`/`Scanner::go_up`) just move around the tree,
+//! with no further I/O. Only a directory whose contents aren't in the tree
+//! (on another filesystem, or unreadable) needs a separate [`Scanner`]
+//! rooted there — see `App::enter_selected` and `App::scanner_history`.
 //!
 //! Recursion never crosses filesystem boundaries (like `du -x`/
 //! `--one-file-system`): a subdirectory that's actually the mount point of
@@ -34,39 +35,54 @@ use std::os::unix::fs::MetadataExt;
 
 use rayon::iter::{IntoParallelIterator, ParallelBridge, ParallelIterator};
 
-/// One first-level child of the scanned root, with its total size.
-///
-/// For a directory, `size` is the recursive sum of everything under it.
-/// For a plain file, it's just the file's own length.
-#[derive(Debug, Clone)]
-pub struct ScanEntry {
-    pub name: String,
-    pub path: PathBuf,
-    pub size: u64,
-    pub is_dir: bool,
-}
+use crate::model::{Children, Node, NodeId, NodeKind, Subtree, Tree};
 
-/// A directory-size scan in progress (or finished) on a background thread.
+/// A directory-size scan in progress (or finished) on a background thread,
+/// plus the user's position within the resulting tree.
 pub struct Scanner {
-    /// The path whose immediate children are being scanned.
-    pub root: PathBuf,
+    /// Everything measured so far under the scan root, as a tree.
+    /// First-level children appear as their measurement arrives.
+    pub tree: Tree,
     /// Number of first-level children being measured.
     pub total: usize,
-    /// Results received from the background thread so far. Sorted by size
-    /// descending once `finished` is set, so `selected` indexes into a
-    /// stable, display-ready order.
-    pub entries: Vec<ScanEntry>,
+    /// Number of first-level children measured so far.
+    pub measured: usize,
     /// Whether every entry has been measured (or the scan thread has
     /// otherwise finished / disconnected).
     pub finished: bool,
-    /// Index into `entries` of the currently highlighted row, once
-    /// `finished`.
+    /// Index into the current directory's (size-sorted) entries of the
+    /// highlighted row, once `finished`.
     pub selected: usize,
     /// Scroll/selection state for the results `Table`, kept here (rather
     /// than recreated each frame) so ratatui can track the scroll offset
     /// across renders and keep `selected` in view as the list scrolls.
     pub table_state: ratatui::widgets::TableState,
-    rx: mpsc::Receiver<ScanEntry>,
+    /// The directory currently shown; starts at [`Tree::ROOT`].
+    current: NodeId,
+    /// Directories above `current` that were drilled through, with their
+    /// selection and scroll state, innermost last.
+    parents: Vec<SavedView>,
+    rx: mpsc::Receiver<Subtree>,
+}
+
+/// A directory view to restore when going back up.
+struct SavedView {
+    dir: NodeId,
+    selected: usize,
+    table_state: ratatui::widgets::TableState,
+}
+
+/// Outcome of [`Scanner::enter_selected`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Enter {
+    /// Moved into the selected directory, straight from the tree.
+    Entered,
+    /// The selected directory's contents aren't in the tree (another
+    /// filesystem, or it couldn't be read); it needs its own scan.
+    NeedsScan(PathBuf),
+    /// Nothing to enter: the scan isn't finished, nothing is selected, or
+    /// the selection is a file.
+    Ignored,
 }
 
 impl Scanner {
@@ -84,44 +100,45 @@ impl Scanner {
 
         thread::spawn(move || {
             children.into_par_iter().for_each_with(tx, |tx, child| {
-                let size = if child.is_dir {
-                    if crosses_filesystem_boundary(&child.path, root_dev) {
-                        0
-                    } else {
-                        dir_size(&child.path, root_dev)
-                    }
+                let subtree = if child.is_dir {
+                    dir_subtree(child.name, &child.path, root_dev)
                 } else {
-                    child.size
+                    Subtree::file(child.name, child.size)
                 };
-                let _ = tx.send(ScanEntry {
-                    name: child.name,
-                    path: child.path,
-                    size,
-                    is_dir: child.is_dir,
-                });
+                let _ = tx.send(subtree);
             });
         });
 
+        let mut tree = Tree::new(root);
+        tree.mark_loaded(Tree::ROOT);
+
         Ok(Self {
-            root,
+            tree,
             total,
-            entries: Vec::with_capacity(total),
+            measured: 0,
             finished: total == 0,
             selected: 0,
             table_state: ratatui::widgets::TableState::default().with_selected(Some(0)),
+            current: Tree::ROOT,
+            parents: Vec::new(),
             rx,
         })
     }
 
-    /// Drains any results the background thread has produced so far, and
-    /// sorts `entries` by size descending once every entry has arrived.
+    /// Drains any results the background thread has produced so far,
+    /// grafting each into `tree`, and sorts the tree's children by size
+    /// descending once every entry has arrived.
     ///
     /// Non-blocking: intended to be called periodically (e.g. once per
     /// `Event::Tick`) rather than awaited.
     pub fn poll(&mut self) {
+        let was_finished = self.finished;
         loop {
             match self.rx.try_recv() {
-                Ok(entry) => self.entries.push(entry),
+                Ok(subtree) => {
+                    self.tree.attach(Tree::ROOT, subtree);
+                    self.measured += 1;
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.finished = true;
@@ -129,12 +146,12 @@ impl Scanner {
                 }
             }
         }
-        if self.entries.len() >= self.total {
+        if self.measured >= self.total {
             self.finished = true;
         }
-        if self.finished {
-            self.entries
-                .sort_by_key(|entry| std::cmp::Reverse(entry.size));
+        // Sort once, on the tick the scan finishes, rather than every tick.
+        if self.finished && !was_finished {
+            self.tree.sort_children_by_size();
         }
     }
 
@@ -143,34 +160,106 @@ impl Scanner {
         if self.total == 0 {
             1.0
         } else {
-            (self.entries.len() as f64 / self.total as f64).min(1.0)
+            (self.measured as f64 / self.total as f64).min(1.0)
         }
     }
 
-    /// The currently highlighted entry, if any.
-    pub fn selected_entry(&self) -> Option<&ScanEntry> {
-        self.entries.get(self.selected)
+    /// The path this scan was started from.
+    pub fn root(&self) -> &Path {
+        self.tree.root_path()
+    }
+
+    /// The path of the directory currently shown.
+    pub fn current_path(&self) -> PathBuf {
+        self.tree
+            .path(self.current)
+            .unwrap_or_else(|| self.root().to_path_buf())
+    }
+
+    /// Entries of the directory currently shown, largest first once the
+    /// scan is finished.
+    pub fn entries(&self) -> impl Iterator<Item = &Node> {
+        self.current_children()
+            .iter()
+            .filter_map(|&id| self.tree.get(id))
+    }
+
+    /// Number of entries in the directory currently shown.
+    pub fn entry_count(&self) -> usize {
+        self.current_children().len()
+    }
+
+    fn current_children(&self) -> &[NodeId] {
+        self.tree.children(self.current).unwrap_or(&[])
     }
 
     /// Moves the selection to the next entry, wrapping at the end.
     pub fn select_next(&mut self) {
-        if self.entries.is_empty() {
+        let count = self.entry_count();
+        if count == 0 {
             return;
         }
-        self.selected = (self.selected + 1) % self.entries.len();
+        self.selected = (self.selected + 1) % count;
         self.table_state.select(Some(self.selected));
     }
 
     /// Moves the selection to the previous entry, wrapping at the start.
     pub fn select_previous(&mut self) {
-        if self.entries.is_empty() {
+        let count = self.entry_count();
+        if count == 0 {
             return;
         }
-        self.selected = self
-            .selected
-            .checked_sub(1)
-            .unwrap_or(self.entries.len() - 1);
+        self.selected = self.selected.checked_sub(1).unwrap_or(count - 1);
         self.table_state.select(Some(self.selected));
+    }
+
+    /// Drills into the selected entry if it's a directory whose contents
+    /// are already in the tree, remembering the current view so
+    /// [`Scanner::go_up`] can restore it.
+    pub fn enter_selected(&mut self) -> Enter {
+        if !self.finished {
+            return Enter::Ignored;
+        }
+        let Some(&id) = self.current_children().get(self.selected) else {
+            return Enter::Ignored;
+        };
+        let Some(node) = self.tree.get(id) else {
+            return Enter::Ignored;
+        };
+        match &node.kind {
+            NodeKind::File => Enter::Ignored,
+            NodeKind::Dir(Children::Unloaded) => match self.tree.path(id) {
+                Some(path) => Enter::NeedsScan(path),
+                None => Enter::Ignored,
+            },
+            NodeKind::Dir(Children::Loaded(_)) => {
+                let table_state = std::mem::replace(
+                    &mut self.table_state,
+                    ratatui::widgets::TableState::default().with_selected(Some(0)),
+                );
+                self.parents.push(SavedView {
+                    dir: self.current,
+                    selected: self.selected,
+                    table_state,
+                });
+                self.current = id;
+                self.selected = 0;
+                Enter::Entered
+            }
+        }
+    }
+
+    /// Goes back to the parent directory within this scan, restoring its
+    /// selection and scroll position. Returns `false` (and does nothing)
+    /// if already at the scan root.
+    pub fn go_up(&mut self) -> bool {
+        let Some(view) = self.parents.pop() else {
+            return false;
+        };
+        self.current = view.dir;
+        self.selected = view.selected;
+        self.table_state = view.table_state;
+        true
     }
 }
 
@@ -221,50 +310,55 @@ fn immediate_children(root: &Path) -> io::Result<Vec<PendingChild>> {
     Ok(children)
 }
 
-/// Recursively sums the size of every file under `path`, parallelizing
-/// across subdirectories with `rayon`. Skips entries it can't read
-/// (permission errors, races) and symlinks (to avoid cycles/double
-/// counting) rather than failing the whole scan. Also stops at
-/// filesystem boundaries (like `du -x`/`--one-file-system`): a
+/// Recursively walks the directory at `path` into a [`Subtree`] named
+/// `name`, parallelizing across subdirectories with `rayon`. Its size is
+/// the sum of everything under it.
+///
+/// Skips entries it can't read (permission errors, races) and symlinks
+/// (to avoid cycles/double counting) rather than failing the whole scan.
+/// A directory that can't be listed at all becomes an unloaded,
+/// zero-sized node, so opening it attempts a fresh scan that reports the
+/// error. Also
+/// stops at filesystem boundaries (like `du -x`/`--one-file-system`): a
 /// subdirectory that's the mount point of a different filesystem than
-/// `root_dev` contributes `0`, since its space isn't part of the disk
-/// being measured (this is what prevents e.g. `/System/Volumes/Data`,
-/// `/Volumes/*`, or network mounts reachable from `/` from being summed
-/// into the size of the root filesystem).
-fn dir_size(path: &Path, root_dev: Option<u64>) -> u64 {
+/// `root_dev` becomes an unloaded, zero-sized node, since its space isn't
+/// part of the disk being measured (this is what prevents e.g.
+/// `/System/Volumes/Data`, `/Volumes/*`, or network mounts reachable from
+/// `/` from being summed into the size of the root filesystem).
+fn dir_subtree(name: String, path: &Path, root_dev: Option<u64>) -> Subtree {
+    if crosses_filesystem_boundary(path, root_dev) {
+        return Subtree::unloaded_dir(name, 0);
+    }
     let Ok(entries) = fs::read_dir(path) else {
-        return 0;
+        return Subtree::unloaded_dir(name, 0);
     };
-    entries
+    let children = entries
         .par_bridge()
         .filter_map(Result::ok)
-        .map(|entry| entry_size(&entry, root_dev))
-        .sum()
+        .filter_map(|entry| entry_subtree(&entry, root_dev))
+        .collect();
+    Subtree::dir(name, children)
 }
 
-fn entry_size(entry: &fs::DirEntry, root_dev: Option<u64>) -> u64 {
-    let Ok(file_type) = entry.file_type() else {
-        return 0;
-    };
+/// The [`Subtree`] for one directory entry, or `None` for entries that
+/// are skipped (symlinks, and entries whose type can't be read).
+fn entry_subtree(entry: &fs::DirEntry, root_dev: Option<u64>) -> Option<Subtree> {
+    let file_type = entry.file_type().ok()?;
     if file_type.is_symlink() {
-        0
-    } else if file_type.is_dir() {
-        let path = entry.path();
-        if crosses_filesystem_boundary(&path, root_dev) {
-            0
-        } else {
-            dir_size(&path, root_dev)
-        }
+        return None;
+    }
+    let name = entry.file_name().to_string_lossy().into_owned();
+    if file_type.is_dir() {
+        Some(dir_subtree(name, &entry.path(), root_dev))
     } else {
         #[cfg(unix)]
-        {
+        let size = {
             use std::os::unix::fs::MetadataExt;
             entry.metadata().map(|m| m.blocks() * 512).unwrap_or(0)
-        }
+        };
         #[cfg(not(unix))]
-        {
-            entry.metadata().map(|m| m.len()).unwrap_or(0)
-        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        Some(Subtree::file(name, size))
     }
 }
 
@@ -302,6 +396,160 @@ mod tests {
         f.write_all(bytes).unwrap();
     }
 
+    fn wait_until_finished(scanner: &mut Scanner) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !scanner.finished && Instant::now() < deadline {
+            scanner.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(scanner.finished, "scan did not finish in time");
+    }
+
+    #[test]
+    fn builds_a_tree_of_everything_under_root() {
+        let dir =
+            std::env::temp_dir().join(format!("duv-scanner-tree-test-{}", std::process::id()));
+        fs::create_dir_all(dir.join("sub").join("deeper")).unwrap();
+        fs::create_dir_all(dir.join("empty")).unwrap();
+        write_file(&dir.join("top.txt"), b"hello");
+        write_file(&dir.join("sub").join("a.txt"), b"world!");
+        write_file(
+            &dir.join("sub").join("deeper").join("c.txt"),
+            &[0u8; 10_000],
+        );
+
+        let mut scanner = Scanner::spawn(dir.clone()).unwrap();
+        wait_until_finished(&mut scanner);
+        let tree = &scanner.tree;
+
+        // root, top.txt, sub, empty, a.txt, deeper, c.txt
+        assert_eq!(tree.node_count(), 7);
+
+        // Root total matches the sum of the first-level entries.
+        let entries_total: u64 = scanner.entries().map(|e| e.size).sum();
+        assert_eq!(tree.get(Tree::ROOT).unwrap().size, entries_total);
+
+        // Top-level entries are sorted largest first.
+        let sizes: Vec<u64> = scanner.entries().map(|e| e.size).collect();
+        assert!(sizes.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert_eq!(&*scanner.entries().next().unwrap().name, "sub");
+
+        // Nested nodes are present, with paths rebuilt from the root.
+        let find = |parent, name: &str| {
+            tree.children(parent)
+                .unwrap()
+                .iter()
+                .copied()
+                .find(|&id| &*tree.get(id).unwrap().name == name)
+                .unwrap()
+        };
+        let sub = find(Tree::ROOT, "sub");
+        let deeper = find(sub, "deeper");
+        let c = find(deeper, "c.txt");
+        assert_eq!(
+            tree.path(c).unwrap(),
+            dir.join("sub").join("deeper").join("c.txt")
+        );
+        assert!(tree.get(c).unwrap().size >= 10_000);
+        assert_eq!(tree.get(deeper).unwrap().size, tree.get(c).unwrap().size);
+
+        // An empty directory is loaded with no children, not unloaded.
+        let empty = find(Tree::ROOT, "empty");
+        assert_eq!(tree.children(empty), Some(&[][..]));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn select_by_name(scanner: &mut Scanner, name: &str) {
+        let index = scanner.entries().position(|e| &*e.name == name).unwrap();
+        while scanner.selected != index {
+            scanner.select_next();
+        }
+    }
+
+    fn entry_names(scanner: &Scanner) -> Vec<String> {
+        scanner.entries().map(|e| e.name.to_string()).collect()
+    }
+
+    #[test]
+    fn navigates_the_tree_without_rescanning() {
+        let dir = std::env::temp_dir().join(format!("duv-scanner-nav-test-{}", std::process::id()));
+        fs::create_dir_all(dir.join("sub").join("deeper")).unwrap();
+        write_file(&dir.join("top.txt"), b"hello");
+        write_file(&dir.join("sub").join("a.txt"), b"world!");
+        write_file(
+            &dir.join("sub").join("deeper").join("c.txt"),
+            &[0u8; 10_000],
+        );
+
+        let mut scanner = Scanner::spawn(dir.clone()).unwrap();
+        wait_until_finished(&mut scanner);
+
+        // Remove the files: navigating must still show them, proving it
+        // reads from the tree rather than the filesystem.
+        fs::remove_dir_all(&dir).unwrap();
+
+        select_by_name(&mut scanner, "top.txt");
+        assert_eq!(scanner.enter_selected(), Enter::Ignored);
+        let top_selected = scanner.selected;
+
+        select_by_name(&mut scanner, "sub");
+        let sub_selected = scanner.selected;
+        assert_eq!(scanner.enter_selected(), Enter::Entered);
+        assert_eq!(scanner.current_path(), dir.join("sub"));
+        assert_eq!(entry_names(&scanner), ["deeper", "a.txt"]);
+        assert_eq!(scanner.selected, 0);
+
+        assert_eq!(scanner.enter_selected(), Enter::Entered);
+        assert_eq!(scanner.current_path(), dir.join("sub").join("deeper"));
+        assert_eq!(entry_names(&scanner), ["c.txt"]);
+
+        assert!(scanner.go_up());
+        assert_eq!(scanner.current_path(), dir.join("sub"));
+        assert!(scanner.go_up());
+        assert_eq!(scanner.current_path(), dir);
+        assert_eq!(scanner.selected, sub_selected);
+        assert_ne!(scanner.selected, top_selected);
+        assert!(!scanner.go_up());
+    }
+
+    #[test]
+    fn enter_is_ignored_while_scanning() {
+        let dir =
+            std::env::temp_dir().join(format!("duv-scanner-busy-test-{}", std::process::id()));
+        fs::create_dir_all(dir.join("sub")).unwrap();
+
+        let mut scanner = Scanner::spawn(dir.clone()).unwrap();
+        assert!(!scanner.finished);
+        assert_eq!(scanner.enter_selected(), Enter::Ignored);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_directory_needs_its_own_scan() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("duv-scanner-locked-test-{}", std::process::id()));
+        let locked = dir.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        write_file(&locked.join("secret.txt"), b"x");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Running as root can read it anyway; nothing to test then.
+        if fs::read_dir(&locked).is_err() {
+            let mut scanner = Scanner::spawn(dir.clone()).unwrap();
+            wait_until_finished(&mut scanner);
+            select_by_name(&mut scanner, "locked");
+            assert_eq!(scanner.enter_selected(), Enter::NeedsScan(locked.clone()));
+        }
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn scans_first_level_children_with_correct_sizes() {
         let dir = std::env::temp_dir().join(format!("duv-scanner-test-{}", std::process::id()));
@@ -313,24 +561,15 @@ mod tests {
         let mut scanner = Scanner::spawn(dir.clone()).unwrap();
         assert_eq!(scanner.total, 2); // "top.txt" and "sub"
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !scanner.finished && Instant::now() < deadline {
-            scanner.poll();
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(scanner.finished, "scan did not finish in time");
+        wait_until_finished(&mut scanner);
 
-        let file_entry = scanner
-            .entries
-            .iter()
-            .find(|e| e.name == "top.txt")
-            .unwrap();
+        let file_entry = scanner.entries().find(|e| &*e.name == "top.txt").unwrap();
         assert!(file_entry.size >= 5);
-        assert!(!file_entry.is_dir);
+        assert!(!file_entry.is_dir());
 
-        let dir_entry = scanner.entries.iter().find(|e| e.name == "sub").unwrap();
+        let dir_entry = scanner.entries().find(|e| &*e.name == "sub").unwrap();
         assert!(dir_entry.size >= 8); // 6 + 2
-        assert!(dir_entry.is_dir);
+        assert!(dir_entry.is_dir());
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -349,16 +588,11 @@ mod tests {
         file.write_all(b"a").unwrap();
 
         let mut scanner = Scanner::spawn(dir.clone()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !scanner.finished && Instant::now() < deadline {
-            scanner.poll();
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_finished(&mut scanner);
 
         let entry = scanner
-            .entries
-            .iter()
-            .find(|e| e.name == "sparse.txt")
+            .entries()
+            .find(|e| &*e.name == "sparse.txt")
             .expect("Sparse file not found in scan");
 
         // The logical size is > 1GiB, but the physical size should be very small (usually a few KiB)

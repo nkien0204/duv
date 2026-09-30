@@ -10,6 +10,9 @@ pub mod disks;
 /// Terminal events handler.
 pub mod event;
 
+/// In-memory tree of scanned paths and sizes.
+pub mod model;
+
 /// First-level directory-size scanning.
 pub mod scanner;
 
