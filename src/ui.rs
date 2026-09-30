@@ -120,7 +120,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
     let Some(scanner) = &mut app.scanner else {
         return;
     };
-    let root = scanner.root.display().to_string();
+    let root = scanner.current_path().display().to_string();
     let is_scanning = !scanner.finished;
 
     let mut block = Block::default()
@@ -135,7 +135,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         block = block.border_style(Style::default().fg(Color::DarkGray));
     }
 
-    if scanner.entries.is_empty() {
+    if scanner.entry_count() == 0 {
         frame.render_widget(
             Paragraph::new("Empty directory.")
                 .block(block)
@@ -161,10 +161,11 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         ])
         .style(header_style);
 
-        let rows = scanner.entries.iter().enumerate().map(|(i, entry)| {
+        let selected = scanner.selected;
+        let rows = scanner.entries().enumerate().map(|(i, entry)| {
             let style = if is_scanning {
                 Style::default().fg(Color::DarkGray)
-            } else if i == scanner.selected {
+            } else if i == selected {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Yellow)
@@ -173,8 +174,8 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
                 Style::default()
             };
             Row::new(vec![
-                Cell::from(entry.name.clone()),
-                Cell::from(if entry.is_dir { "Dir" } else { "File" }),
+                Cell::from(entry.name.to_string()),
+                Cell::from(if entry.is_dir() { "Dir" } else { "File" }),
                 Cell::from(format_bytes(entry.size)),
             ])
             .style(style)
@@ -203,7 +204,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         let area = ratatui::layout::Rect::new(x, y, bar_width, bar_height);
 
         let ratio = scanner.progress_fraction().clamp(0.0, 1.0);
-        let label = format!("{}/{} entries", scanner.entries.len(), scanner.total);
+        let label = format!("{}/{} folders", scanner.measured, scanner.total);
         let gauge = Gauge::default()
             .gauge_style(Style::default().fg(Color::Yellow))
             .ratio(ratio)

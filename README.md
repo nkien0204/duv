@@ -44,6 +44,22 @@ Without arguments, `duv` opens on the list of mounted disks. With a path
 directory; pressing `h`/`Esc` from there goes back to the disk list. Also
 supports `--help` and `--version`.
 
+### Memory use
+
+`duv` keeps what it scans in memory so browsing is instant, up to a
+budget of 256 MiB by default (roughly 3 million files and folders). On
+larger trees, folders beyond the budget are kept as totals only (sizes
+stay exact) and are scanned again when you open them, dropping the
+folders you visited least recently to make room. Change the budget with:
+
+```sh
+duv --memory-budget 512 [path]
+```
+
+The budget covers `duv`'s own record of the tree; the process as a whole
+uses more (typically up to about 1.5× the budget, plus some fixed
+overhead).
+
 ## Controls
 
 | Key                             | Action                   |
