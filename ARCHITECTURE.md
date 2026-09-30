@@ -40,6 +40,16 @@ flowchart LR
 
 ## Modules
 
+### `cli.rs` — argument parsing
+
+`Cli` (derived with `clap`) models `duv [path]`; `path` is optional (`duv .` scans the current
+directory). `Cli::start_path()`
+canonicalizes the path and rejects missing or non-directory paths; `main.rs`
+calls it before the terminal enters raw mode, so bad input produces an
+ordinary shell error. With `Some(path)`, `main` builds the app with `App::with_start_path`,
+which begins scanning that directory immediately; with `None` it uses
+`App::new()` and opens on the disk list.
+
 ### `app.rs` — Model
 
 Holds all application state: `should_quit`, whether to show a quit confirmation
@@ -195,7 +205,7 @@ piping/redirection separate from the TUI's own screen buffer.
 
 ### `main.rs` — composition root
 
-Thin entry point: constructs `App`, `Terminal`, `EventHandler`, wraps them
+Thin entry point: parses `Cli`, constructs `App`, `Terminal`, `EventHandler`, wraps them
 in `Tui`, then loops:
 
 ```rust
@@ -221,6 +231,8 @@ tui.exit()?;
   volume enumeration in `disks.rs`. Disabling default features and opting
   into only the `disk` feature keeps this dependency's footprint minimal,
   per `AGENTS.md`'s lightweight-dependency convention.
+- **`clap`** (`derive` plus minimal features, no colour/suggestions) —
+  argument parsing in `cli.rs`.
 - **`rayon`** — work-stealing parallelism for recursively sizing
   directories in `scanner.rs`. This is the core value proposition of a
   "fast" disk usage tool, so parallelizing the I/O-bound directory walk
@@ -235,8 +247,6 @@ Not yet implemented; will slot into the modules above as they land:
   scanned so far (currently, only the navigation stack of `Scanner`s is
   kept — going back re-uses a completed scan, but nothing is cached beyond
   that path).
-- **`cli`** — argument parsing (likely `clap`) for the entry point in
-  `main.rs` (e.g. `duv [path]`).
 - **Delete/manage actions** — acting on a selected entry (delete, reveal in
   Finder/file manager, etc.).
 

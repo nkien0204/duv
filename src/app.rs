@@ -65,6 +65,15 @@ impl App {
         Self::default()
     }
 
+    /// Constructs an [`App`] that immediately scans `root` instead of
+    /// showing the disk list. Backing out of that scan returns to the
+    /// disk list.
+    pub fn with_start_path(root: PathBuf) -> Self {
+        let mut app = Self::default();
+        app.spawn_scan(root);
+        app
+    }
+
     /// Handles the tick event of the terminal: polls the active scan (if
     /// any) for newly completed results.
     pub fn tick(&mut self) {
