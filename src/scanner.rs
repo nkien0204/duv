@@ -56,7 +56,7 @@ use std::os::unix::fs::MetadataExt;
 
 use rayon::iter::{IntoParallelIterator, ParallelBridge, ParallelIterator};
 
-use crate::model::{Children, Node, NodeId, NodeKind, Tree};
+use crate::model::{Children, Lookup, Node, NodeId, NodeKind, Tree};
 
 /// Default memory budget for a scan's tree, in bytes of
 /// [`Tree::approx_bytes`].
@@ -254,6 +254,43 @@ impl Scanner {
     /// Number of entries in the directory currently shown.
     pub fn entry_count(&self) -> usize {
         self.current_children().len()
+    }
+
+    /// The highlighted entry and its full path, once the scan is finished.
+    pub fn selected_entry(&self) -> Option<(&Node, PathBuf)> {
+        if !self.finished {
+            return None;
+        }
+        let &id = self.current_children().get(self.selected)?;
+        Some((self.tree.get(id)?, self.tree.path(id)?))
+    }
+
+    /// Updates the tree after `path` (measured as `size` bytes) was deleted
+    /// from disk: removes its node if it has one, or subtracts `size` from
+    /// the unloaded directory that contains it. Keeps the selection on a
+    /// valid row. Does nothing while a scan is running (its pending
+    /// listings may refer to the removed nodes), for the directory being
+    /// shown or its ancestors, or if `path` isn't counted in this tree.
+    pub fn forget(&mut self, path: &Path, size: u64) {
+        if !self.finished {
+            return;
+        }
+        match self.tree.lookup(path) {
+            Lookup::Found(id) => {
+                if id == self.current || self.parents.iter().any(|view| view.dir == id) {
+                    return;
+                }
+                let last_visit = &mut self.last_visit;
+                self.tree.remove(id, |freed| {
+                    last_visit.remove(&freed);
+                });
+                let count = self.entry_count();
+                self.selected = self.selected.min(count.saturating_sub(1));
+                self.table_state.select(Some(self.selected));
+            }
+            Lookup::InsideUnloaded(dir) => self.tree.subtract_size(dir, size),
+            Lookup::NotCounted | Lookup::Outside => {}
+        }
     }
 
     fn current_children(&self) -> &[NodeId] {
@@ -899,6 +936,57 @@ mod tests {
         .collect();
         assert_eq!(linked.iter().filter(|&&size| size > 0).count(), 1);
         assert_eq!(tree.node_count(), 1 + 2 + 3 + 1); // root, a, b, 3 links, other
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn forget_removes_a_loaded_entry() {
+        let dir = sample_dir("forget");
+        let mut scanner = scan(&dir, NO_LIMIT);
+        let root = scanner.tree.get(Tree::ROOT).unwrap().size;
+        select_by_name(&mut scanner, "top.txt");
+        let (node, path) = scanner.selected_entry().unwrap();
+        let size = node.size;
+
+        scanner.forget(&path, size);
+        assert!(!entry_names(&scanner).contains(&"top.txt".to_string()));
+        assert_eq!(scanner.tree.get(Tree::ROOT).unwrap().size, root - size);
+        assert!(scanner.selected < scanner.entry_count());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn forget_subtracts_from_a_folded_directory() {
+        let dir = sample_dir("forget-folded");
+        let mut scanner = scan(&dir, 1);
+        let sub_before = scanner.entries().find(|e| &*e.name == "sub").unwrap().size;
+        let root_before = scanner.tree.get(Tree::ROOT).unwrap().size;
+
+        scanner.forget(&dir.join("sub").join("deeper").join("c.txt"), 4096);
+        let sub_after = scanner.entries().find(|e| &*e.name == "sub").unwrap().size;
+        assert_eq!(sub_after, sub_before - 4096);
+        assert_eq!(
+            scanner.tree.get(Tree::ROOT).unwrap().size,
+            root_before - 4096
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn forget_never_removes_the_current_directory_or_its_parents() {
+        let dir = sample_dir("forget-path");
+        let mut scanner = scan(&dir, NO_LIMIT);
+        select_by_name(&mut scanner, "sub");
+        assert_eq!(scanner.enter_selected(), Enter::Entered);
+        let count = scanner.tree.node_count();
+
+        scanner.forget(&dir.join("sub"), 1);
+        scanner.forget(&dir, 1);
+        assert_eq!(scanner.tree.node_count(), count);
+        assert_eq!(scanner.current_path(), dir.join("sub"));
 
         fs::remove_dir_all(&dir).ok();
     }

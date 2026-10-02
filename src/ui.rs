@@ -5,13 +5,13 @@
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint},
+    layout::{Alignment, Constraint, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph, Row, Table},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, Wrap},
 };
 
-use crate::app::App;
+use crate::app::{App, Choice, DeleteRequest};
 use crate::disks::format_bytes;
 
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -23,8 +23,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         render_disks(app, frame);
     }
 
+    if let Some(request) = &app.delete_confirmation {
+        render_delete_confirmation(request, frame);
+    }
     if app.quit_confirmation.is_some() {
         render_quit_confirmation(app, frame);
+    }
+    if let Some(notice) = &app.notice {
+        render_notice(notice, frame);
     }
 }
 
@@ -125,7 +131,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
 
     let mut block = Block::default()
         .title(format!(
-            "DUV — {root} (l/Enter to open, h/Esc to go back, s to rescan, q to quit)"
+            "DUV — {root} (l/Enter to open, h/Esc to go back, s to rescan, d to trash, q to quit)"
         ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
@@ -221,56 +227,165 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
 }
 
 fn render_quit_confirmation(app: &App, frame: &mut Frame) {
-    use ratatui::layout::Rect;
+    let Some(choice) = app.quit_confirmation else {
+        return;
+    };
+    let message = vec![Line::from(Span::styled(
+        " Are you sure you want to quit? ",
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    render_confirmation(frame, " Quit ", message, choice);
+}
 
-    let area = frame.area();
-    let popup_width = 40;
-    let popup_height = 5;
-    let x = (area.width.saturating_sub(popup_width)) / 2;
-    let y = (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
+fn render_delete_confirmation(request: &DeleteRequest, frame: &mut Frame) {
+    let message = vec![Line::from(Span::styled(
+        format!(" Move {} to the Trash? ", request.name),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    render_confirmation(frame, " Delete ", message, request.choice);
+}
 
+/// Minimum width of Yes/No popups, in columns.
+const CONFIRMATION_WIDTH: u16 = 40;
+
+/// A centered Yes/No popup: `message` lines, a blank line, then the two
+/// buttons with `choice` highlighted.
+fn render_confirmation(frame: &mut Frame, title: &str, mut message: Vec<Line>, choice: Choice) {
+    let highlighted = Style::default()
+        .bg(Color::Yellow)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let style = |button| {
+        if choice == button {
+            highlighted
+        } else {
+            Style::default()
+        }
+    };
+    message.push(Line::from(""));
+    message.push(Line::from(vec![
+        Span::styled(" Yes ", style(Choice::Yes)),
+        Span::raw("   "),
+        Span::styled(" No ", style(Choice::No)),
+    ]));
+
+    let widest = message.iter().map(Line::width).max().unwrap_or(0) as u16;
+    // Same width for every confirmation, widening only for long names.
+    let width = (widest + 4).max(CONFIRMATION_WIDTH);
+    let area = popup_area(frame.area(), width, message.len() as u16 + 2);
     let block = Block::default()
-        .title(" Quit ")
+        .title(title.to_string())
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
 
-    let yes_style = if app.quit_confirmation == Some(crate::app::QuitOption::Yes) {
-        Style::default()
-            .bg(Color::Yellow)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    let no_style = if app.quit_confirmation == Some(crate::app::QuitOption::No) {
-        Style::default()
-            .bg(Color::Yellow)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(message)
+            .block(block)
+            .alignment(Alignment::Center),
+        area,
+    );
+}
 
+/// A centered popup showing `notice` until the next key press.
+fn render_notice(notice: &str, frame: &mut Frame) {
+    let width = frame.area().width.saturating_sub(4).clamp(20, 70);
+    let text_width = (width - 4).max(1) as usize;
+    let text_lines = notice.chars().count().div_ceil(text_width).max(1) as u16;
+    let area = popup_area(frame.area(), width, text_lines + 4);
+    let block = Block::default()
+        .title(" Error ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Red));
     let text = vec![
-        Line::from(vec![ratatui::text::Span::styled(
-            " Are you sure you want to quit? ",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
+        Line::from(Span::styled(
+            notice.to_string(),
+            Style::default().fg(Color::Red),
+        )),
         Line::from(""),
-        Line::from(vec![
-            ratatui::text::Span::styled(" Yes ", yes_style),
-            ratatui::text::Span::raw("   "),
-            ratatui::text::Span::styled(" No ", no_style),
-        ]),
+        Line::from(Span::styled(
+            "Press any key to close",
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
 
-    frame.render_widget(Clear, popup_area);
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(text)
             .block(block)
-            .alignment(Alignment::Center),
-        popup_area,
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        area,
     );
+}
+
+/// A `width` x `height` rectangle centered in `area`, shrunk to fit.
+fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::DeleteRequest;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    /// Width of the popup drawn over a blank screen: the span between the
+    /// rounded top corners on the popup's first row.
+    fn popup_width(draw: impl FnOnce(&mut Frame)) -> usize {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(draw).unwrap();
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width;
+        for y in 0..buffer.area.height {
+            let row: Vec<&str> = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+            if let (Some(left), Some(right)) = (
+                row.iter().position(|&s| s == "╭"),
+                row.iter().position(|&s| s == "╮"),
+            ) {
+                return right - left + 1;
+            }
+        }
+        panic!("no popup drawn");
+    }
+
+    fn delete_request(name: &str) -> DeleteRequest {
+        DeleteRequest {
+            path: format!("/tmp/{name}").into(),
+            name: name.to_string(),
+            size: 4096,
+            is_dir: false,
+            choice: Choice::No,
+        }
+    }
+
+    #[test]
+    fn delete_popup_is_as_wide_as_quit_popup() {
+        let quit = popup_width(|frame| {
+            let message = vec![Line::from(" Are you sure you want to quit? ")];
+            render_confirmation(frame, " Quit ", message, Choice::No);
+        });
+        let delete =
+            popup_width(|frame| render_delete_confirmation(&delete_request("a.txt"), frame));
+        assert_eq!(quit, CONFIRMATION_WIDTH as usize);
+        assert_eq!(delete, quit);
+    }
+
+    #[test]
+    fn delete_popup_widens_for_long_names() {
+        let name = "a-really-long-file-name-that-does-not-fit-in-forty-columns.tar.gz";
+        let width = popup_width(|frame| render_delete_confirmation(&delete_request(name), frame));
+        let question = format!(" Move {name} to the Trash? ");
+        assert_eq!(width, question.len() + 4);
+    }
 }

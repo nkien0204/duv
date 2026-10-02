@@ -6,7 +6,7 @@ functionality and _how_ the pieces communicate.
 
 > **Status:** early development. Disk enumeration, directory scanning into
 > a memory-budgeted in-memory tree, and drill-down navigation of that tree
-> exist. No delete/manage actions yet. This document describes the
+> exist, plus moving entries to the Trash. No other manage actions yet. This document describes the
 > current skeleton and the conventions to extend it, not a finished
 > product.
 
@@ -59,7 +59,7 @@ runs `stats.rs` instead of the TUI.
 ### `app.rs` — Model
 
 Holds all application state: `should_quit`, whether to show a quit confirmation
-(`quit_confirmation: Option<QuitOption>`), the list of mounted disks
+(`quit_confirmation: Option<Choice>`), the list of mounted disks
 (`disks: Vec<disks::DiskInfo>`), the currently highlighted disk row
 (`selected: usize`), and the drill-down navigation state:
 
@@ -77,6 +77,19 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
   within the current scanner, then pops this stack, then falls back to
   the disk list.
 - `memory_budget: usize` — passed to every `Scanner` it spawns.
+- `delete_confirmation: Option<DeleteRequest>` — the entry (path, name,
+  size, kind) the user asked to move to the Trash, and the highlighted
+  `Choice` (defaults to `No`). `request_delete()` opens it for the
+  highlighted entry of a finished scan; `confirm_delete()` closes it and,
+  on `Yes`, calls `trash` and then `Scanner::forget` on the current scanner
+  **and every scanner in `scanner_history`**, so totals stay right when
+  backing out. A failure sets `notice` instead.
+- `notice: Option<String>` — a message shown in a popup until the next
+  key press (currently: failed deletes).
+- `trash: TrashFn` — the function that moves a path to the Trash;
+  `move_to_trash` (the `trash` crate, using `NSFileManager` on macOS so it
+  never triggers a Finder automation prompt) by default, swapped for a
+  plain delete inside a temp directory in tests.
 - `scanner_error: Option<String>` — set if the most recent scan attempt
   failed to even list its root directory (e.g. a permissions error).
 
@@ -118,8 +131,11 @@ A directory's `Children` say whether its entries are in memory:
 - `Unreadable` — couldn't be listed.
 
 The invariant is that a loaded directory's `size` is the sum of its
-children's; `add_child`, `add_size` and `clear_size` keep it by applying
-every change to all ancestors. `evict_children` drops everything under a
+children's; `add_child`, `add_size`, `subtract_size` and `clear_size` keep
+it by applying every change to all ancestors. `remove` deletes a node and
+everything under it (after a delete on disk), and `lookup(path)` finds
+where a path sits: its node, the `Unloaded` directory containing it, a
+directory whose space isn't counted, or outside the tree. `evict_children` drops everything under a
 directory (marking it `Unloaded`, sizes unchanged) and turns those nodes
 into `NodeKind::Free` slots, which `add_child` reuses before growing the
 list — so memory really stops growing at the budget. `get` never returns
@@ -173,8 +189,13 @@ unloaded directory, now being scanned into the tree; `finished` is
 `false` until done), `Enter::NeedsScan(path)` (another filesystem or
 unreadable, so `App` spawns a new `Scanner` there), or `Enter::Ignored` (a
 file, or a scan is running). `go_up()` restores the parent view, including
-its selection and scroll position. `current_path()`, `entries()` and
-`entry_count()` give the UI what to show.
+its selection and scroll position. `current_path()`, `entries()`,
+`entry_count()` and `selected_entry()` give the UI and `App` what to show.
+`forget(path, size)` updates the tree after a delete on disk: it removes
+the path's node, or subtracts `size` from the unloaded directory containing
+it. It skips scanners that are still running (their pending listings could
+point at removed nodes) and never removes the current directory or its
+parents.
 
 Symlinks are never followed (avoids cycles and double-counting), and
 recursion never crosses filesystem boundaries (like `du -x`/
@@ -249,6 +270,11 @@ both interaction styles are supported simultaneously. Currently handles:
   contents are loaded.
 - `s` — start a scan of the selected disk's mount point, or re-scan the
   directory currently shown if a scan is open (`App::start_scan`).
+- `d` / `Delete` — ask to move the highlighted entry to the Trash
+  (`App::request_delete`). In that popup, `h`/`Left` and `l`/`Right` pick
+  Yes or No, `Enter` confirms (`App::confirm_delete`), and `Esc`/
+  `Backspace` cancel.
+- Any key dismisses a `notice` popup.
 
 Future additions (`gg`/`G`, `Home`/`End`, etc.) belong here too.
 
@@ -279,8 +305,12 @@ rendering types. Dispatches on `App` state to one of three views:
   disk table).
 - `app.scanner_error` set — an error `Paragraph` instead of any of the
   above.
-- `app.quit_confirmation` set — a centered modal popup asking the user to
-  confirm quitting, with "Yes" and "No" options.
+- `app.delete_confirmation` / `app.quit_confirmation` set — a centered
+  Yes/No popup (`render_confirmation`, shared by both) over the current
+  view, laid out the same way: one bold question line (the delete one
+  names the entry), a blank line, then the buttons.
+- `app.notice` set — a centered error popup on top of everything, closed
+  by any key.
 
 ### `tui.rs` — terminal lifecycle
 
@@ -325,6 +355,10 @@ tui.exit()?;
   per `AGENTS.md`'s lightweight-dependency convention.
 - **`clap`** (`derive` plus minimal features, no colour/suggestions) —
   argument parsing in `cli.rs`.
+- **`trash`** — moving entries to the system Trash/Recycle Bin in
+  `app.rs`, across macOS, Linux (freedesktop spec) and Windows. Platform
+  trash APIs differ a lot, so a maintained crate is worth it; on macOS it
+  adds a few small `objc2` crates.
 - **`libc`** (Unix only) — `getrusage` for peak memory in `stats.rs`.
   Already in the dependency tree via `crossterm`, so it adds no new crates.
 - **`rayon`** — work-stealing parallelism for recursively sizing
@@ -337,8 +371,7 @@ tui.exit()?;
 
 Not yet implemented; will slot into the modules above as they land:
 
-- **Delete/manage actions** — acting on a selected entry (delete, reveal in
-  Finder/file manager, etc.).
+- **More manage actions** — e.g. reveal in Finder/file manager, copy path.
 
 Don't scaffold these preemptively — add them when the corresponding feature
 is actually being built.

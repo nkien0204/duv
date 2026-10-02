@@ -19,6 +19,10 @@ terminal.
 - 🎨 Configurable themes and keybindings
 - 💻 Cross-platform (Linux, macOS, Windows)
 
+Deleting moves the entry to the system Trash (Recycle Bin on Windows), so
+it can be restored; the space is freed once the Trash is emptied. The
+confirmation popup defaults to **No**.
+
 ## Installation
 
 ```sh
@@ -62,14 +66,15 @@ overhead).
 
 ## Controls
 
-| Key                             | Action                   |
-| ------------------------------- | ------------------------ |
-| `j` / `k` / `↓` / `↑`           | Move selection           |
-| `l` / `Enter` / `→`             | Open directory           |
-| `h` / `Backspace` / `←` / `Esc` | Go back / Cancel         |
-| `s`                             | Start/Rescan             |
-| `q`                             | Quit (with confirmation) |
-| `Ctrl+C`                        | Quit unconditionally     |
+| Key                             | Action                     |
+| ------------------------------- | -------------------------- |
+| `j` / `k` / `↓` / `↑`           | Move selection             |
+| `l` / `Enter` / `→`             | Open directory             |
+| `h` / `Backspace` / `←` / `Esc` | Go back / Cancel           |
+| `s`                             | Start/Rescan               |
+| `d` / `Delete`                  | Move to Trash (asks first) |
+| `q`                             | Quit (with confirmation)   |
+| `Ctrl+C`                        | Quit unconditionally       |
 
 ## Development
 
