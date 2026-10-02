@@ -27,6 +27,10 @@
 //! that can't be read, need a separate [`Scanner`] rooted there — see
 //! `App::enter_selected` and `App::scanner_history`.
 //!
+//! A file with several hard links is counted once, like `du` does: the
+//! first link seen in a scan counts its full size, the others count `0`
+//! (which link is "first" depends on thread timing).
+//!
 //! Recursion never crosses filesystem boundaries (like `du -x`/
 //! `--one-file-system`): a subdirectory that's actually the mount point of
 //! a different filesystem contributes `0` rather than being summed in,
@@ -36,11 +40,11 @@
 //! mounts, etc., wildly inflating totals beyond the disk's actual size.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -391,7 +395,8 @@ impl Scanner {
     /// Lists `path` (the directory `dir`) synchronously, stores its
     /// entries, and walks its subdirectories in the background.
     fn start_job(&mut self, dir: NodeId, path: &Path) -> io::Result<()> {
-        let (entries, subdirs) = list_dir(path, self.root_dev, &self.next_token)?;
+        let ctx = Arc::new(WalkCtx::new(self.root_dev, Arc::clone(&self.next_token)));
+        let (entries, subdirs) = list_dir(path, &ctx)?;
         self.pending.clear();
         self.tree.clear_size(dir);
         self.store_listing(dir, entries);
@@ -402,13 +407,11 @@ impl Scanner {
         self.finished = false;
 
         let (tx, rx) = mpsc::channel();
-        let root_dev = self.root_dev;
-        let next_token = Arc::clone(&self.next_token);
         thread::spawn(move || {
             subdirs
                 .into_par_iter()
                 .for_each_with(tx, |tx, (token, path)| {
-                    walk(token, &path, root_dev, &next_token, tx);
+                    walk(token, &path, &ctx, tx);
                     let _ = tx.send(Msg::BranchDone);
                 });
         });
@@ -487,23 +490,49 @@ impl Scanner {
     }
 }
 
+/// State shared by every thread of one scan job's walk.
+struct WalkCtx {
+    /// Device id of the scan root; directories on other devices aren't
+    /// walked.
+    root_dev: Option<u64>,
+    /// Source of unique directory tokens.
+    next_token: Arc<AtomicU64>,
+    /// `(device, inode)` of every multiply-linked file already counted in
+    /// this job, so each hard-linked file is counted once (like `du`).
+    seen_links: Mutex<HashSet<(u64, u64)>>,
+}
+
+impl WalkCtx {
+    fn new(root_dev: Option<u64>, next_token: Arc<AtomicU64>) -> Self {
+        Self {
+            root_dev,
+            next_token,
+            seen_links: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Records the file `(dev, ino)` and returns whether this is the first
+    /// time it's been seen in this job.
+    #[cfg(unix)]
+    fn first_link(&self, dev: u64, ino: u64) -> bool {
+        self.seen_links
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((dev, ino))
+    }
+}
+
 /// Lists the directory at `token`/`path`, sends its entries, and then
 /// walks its subdirectories in parallel.
-fn walk(
-    token: u64,
-    path: &Path,
-    root_dev: Option<u64>,
-    next_token: &AtomicU64,
-    tx: &mpsc::Sender<Msg>,
-) {
-    match list_dir(path, root_dev, next_token) {
+fn walk(token: u64, path: &Path, ctx: &WalkCtx, tx: &mpsc::Sender<Msg>) {
+    match list_dir(path, ctx) {
         Err(_) => {
             let _ = tx.send(Msg::Unreadable { token });
         }
         Ok((entries, subdirs)) => {
             let _ = tx.send(Msg::Listed { token, entries });
             subdirs.into_par_iter().for_each(|(token, path)| {
-                walk(token, &path, root_dev, next_token, tx);
+                walk(token, &path, ctx, tx);
             });
         }
     }
@@ -511,21 +540,18 @@ fn walk(
 
 /// Lists the direct entries of `path`, reading their metadata in
 /// parallel, and returns them along with the subdirectories to walk next
-/// (each with a fresh token from `next_token`).
+/// (each with a fresh token from `ctx`).
 ///
 /// Symlinks are skipped (avoids cycles and double counting), as are
 /// entries whose type can't be read. Subdirectories on another filesystem
-/// than `root_dev` are returned as [`EntryKind::OtherFilesystem`] and not
-/// walked.
-fn list_dir(
-    path: &Path,
-    root_dev: Option<u64>,
-    next_token: &AtomicU64,
-) -> io::Result<(Vec<Entry>, Vec<Subdir>)> {
+/// than the scan root are returned as [`EntryKind::OtherFilesystem`] and
+/// not walked. A hard-linked file counts for its full size only the first
+/// time any of its links is seen in the job; later links count as `0`.
+fn list_dir(path: &Path, ctx: &WalkCtx) -> io::Result<(Vec<Entry>, Vec<Subdir>)> {
     let listed: Vec<(Entry, Option<Subdir>)> = fs::read_dir(path)?
         .par_bridge()
         .filter_map(Result::ok)
-        .filter_map(|entry| list_entry(&entry, root_dev, next_token))
+        .filter_map(|entry| list_entry(&entry, ctx))
         .collect();
     let mut subdirs = Vec::new();
     let entries = listed
@@ -538,11 +564,7 @@ fn list_dir(
     Ok((entries, subdirs))
 }
 
-fn list_entry(
-    entry: &fs::DirEntry,
-    root_dev: Option<u64>,
-    next_token: &AtomicU64,
-) -> Option<(Entry, Option<Subdir>)> {
+fn list_entry(entry: &fs::DirEntry, ctx: &WalkCtx) -> Option<(Entry, Option<Subdir>)> {
     let file_type = entry.file_type().ok()?;
     if file_type.is_symlink() {
         return None;
@@ -550,17 +572,22 @@ fn list_entry(
     let name = entry.file_name().to_string_lossy().into();
     if file_type.is_dir() {
         let path = entry.path();
-        if crosses_filesystem_boundary(&path, root_dev) {
+        if crosses_filesystem_boundary(&path, ctx.root_dev) {
             let kind = EntryKind::OtherFilesystem;
             return Some((Entry { name, kind }, None));
         }
-        let token = next_token.fetch_add(1, Ordering::Relaxed);
+        let token = ctx.next_token.fetch_add(1, Ordering::Relaxed);
         let kind = EntryKind::Dir(token);
         return Some((Entry { name, kind }, Some((token, path))));
     }
-    // On-disk size (allocated blocks), so sparse files aren't overcounted.
+    // On-disk size (allocated blocks), so sparse files aren't overcounted;
+    // extra links to a file already counted add nothing.
     #[cfg(unix)]
-    let size = entry.metadata().map(|m| m.blocks() * 512).unwrap_or(0);
+    let size = match entry.metadata() {
+        Ok(m) if m.nlink() > 1 && !ctx.first_link(m.dev(), m.ino()) => 0,
+        Ok(m) => m.blocks() * 512,
+        Err(_) => 0,
+    };
     #[cfg(not(unix))]
     let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
     let kind = EntryKind::File(size);
@@ -832,6 +859,47 @@ mod tests {
         }
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_files_are_counted_once() {
+        let dir = test_dir("hardlink");
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        write_file(&dir.join("a").join("big.bin"), &[1u8; 100_000]);
+        fs::hard_link(dir.join("a").join("big.bin"), dir.join("b").join("link1")).unwrap();
+        fs::hard_link(dir.join("a").join("big.bin"), dir.join("link2")).unwrap();
+        write_file(&dir.join("other.bin"), &[2u8; 50_000]);
+
+        let single = {
+            let solo = test_dir("hardlink-solo");
+            write_file(&solo.join("big.bin"), &[1u8; 100_000]);
+            write_file(&solo.join("other.bin"), &[2u8; 50_000]);
+            let scanner = scan(&solo, NO_LIMIT);
+            let size = scanner.tree.get(Tree::ROOT).unwrap().size;
+            fs::remove_dir_all(&solo).ok();
+            size
+        };
+
+        let scanner = scan(&dir, NO_LIMIT);
+        let total = scanner.tree.get(Tree::ROOT).unwrap().size;
+        assert_eq!(total, single, "three links to one file count once");
+
+        // All links are still listed in the tree; only one carries the size.
+        let tree = &scanner.tree;
+        let linked: Vec<u64> = [
+            find(tree, find(tree, Tree::ROOT, "a"), "big.bin"),
+            find(tree, find(tree, Tree::ROOT, "b"), "link1"),
+            find(tree, Tree::ROOT, "link2"),
+        ]
+        .iter()
+        .map(|&id| tree.get(id).unwrap().size)
+        .collect();
+        assert_eq!(linked.iter().filter(|&&size| size > 0).count(), 1);
+        assert_eq!(tree.node_count(), 1 + 2 + 3 + 1); // root, a, b, 3 links, other
+
         fs::remove_dir_all(&dir).ok();
     }
 

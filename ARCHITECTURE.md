@@ -91,7 +91,14 @@ directly, going through `disks::DiskInfo` instead (see below).
 mounted disk/volume visible to the OS (handling the case where a machine
 has more than one disk). `DiskInfo` and `DiskKind` are plain, crate-local
 types — not re-exports of `sysinfo`'s — so the `sysinfo` dependency stays
-i### `model.rs` — in-memory tree
+isolated to this one module and `App` never has to know about it. This is
+the first step toward letting the user pick which disk/volume to scan;
+`App::new()` currently populates `disks` once at startup via `disks::list()`.
+
+Also home to `format_bytes()`, a small binary-unit (`KiB`/`MiB`/...)
+human-readable size formatter used by `ui.rs`.
+
+### `model.rs` — in-memory tree
 
 `Tree` stores scanned files and directories in one flat `Vec<Node>`,
 addressed by `NodeId` (a `u32` index); nodes point to their parent and
@@ -179,20 +186,20 @@ network shares, etc., wildly inflating totals past the disk's actual
 capacity. Errors on a given entry are swallowed rather than failing the
 whole scan; a directory that can't be listed becomes `Unreadable`, so
 opening it tries a fresh scan that reports the error. Only a failure to
-list a scan's own `root` surfaces as `App::scanner_error`. Hard-linked
-files are currently counted once per link, so totals can exceed `du`'s.
+list a scan's own `root` surfaces as `App::scanner_error`.
+
+A file with several hard links is counted once, like `du` does. Each scan
+job shares a `WalkCtx` across its walk threads, holding a mutex-guarded
+set of `(device, inode)` pairs; only files with a link count above one
+touch it. The first link seen in the job counts its full size and later
+links count `0` (they stay in the tree as entries). Which link is "first"
+depends on thread timing, and a folder loaded in place later is counted
+on its own, so a link whose other half lives elsewhere in the tree can be
+counted again there.
 
 This module has real filesystem-backed tests (per `AGENTS.md`'s stated
 preference for scanning logic), not mocked ones, including folding,
 loading in place and least-recently-visited eviction.
-
-so opening it
-tries a fresh scan that reports the error. Only a failure to list a
-scan's own `root` surfaces as `App::scanner_error`. Hard-linked files are
-currently counted once per link, so totals can exceed `du`'s.
-
-This module has real filesystem-backed tests (per `AGENTS.md`'s stated
-preference for scanning logic), not mocked ones.
 
 ### `stats.rs` — headless scan statistics (developer tool)
 
