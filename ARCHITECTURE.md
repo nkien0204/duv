@@ -80,6 +80,10 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
 - `page_size: usize` — list rows visible on screen, written by `ui.rs` on
   every render, so page jumps match what's on screen.
 - `pending_g: bool` — the first half of a `gg` key sequence.
+- `filter_input: bool` — whether the user is typing a name filter (after
+  `/`). `start_filter`, `filter_push`, `filter_pop`, `accept_filter` and
+  `cancel_filter` edit the current scanner's filter; the filter itself
+  lives on the `Scanner`.
 - `delete_confirmation: Option<DeleteRequest>` — the entry (path, name,
   size, kind) the user asked to move to the Trash, and the highlighted
   `Choice` (defaults to `No`). `request_delete()` opens it for the
@@ -194,6 +198,15 @@ unreadable, so `App` spawns a new `Scanner` there), or `Enter::Ignored` (a
 file, or a scan is running). `go_up()` restores the parent view, including
 its selection and scroll position. `current_path()`, `entries()`,
 `entry_count()` and `selected_entry()` give the UI and `App` what to show.
+`set_filter(query)` / `clear_filter()` narrow the current directory to
+entries whose names contain `query`, ignoring case. All list reads
+(`entries`, `entry_count`, `selected_entry`, `select`, `enter_selected`)
+go through one `visible()` list, so navigation, delete and drill-down act
+on the filtered rows. The filter belongs to the directory: `push_view` and
+`go_up` drop it, and `push_view` first converts the saved row position back
+to the unfiltered list so coming back highlights the same entry.
+`clear_filter` keeps the highlighted entry; `forget` refreshes the matches.
+
 `forget(path, size)` updates the tree after a delete on disk: it removes
 the path's node, or subtracts `size` from the unloaded directory containing
 it. It skips scanners that are still running (their pending listings could
@@ -284,6 +297,11 @@ both interaction styles are supported simultaneously. Currently handles:
   (`App::request_delete`). In that popup, `h`/`Left` and `l`/`Right` pick
   Yes or No, `Enter` confirms (`App::confirm_delete`), and `Esc`/
   `Backspace` cancel.
+- `/` — start or edit a name filter (`App::start_filter`). While typing,
+  printable keys edit the query (so `q`, `d` etc. are text), `Backspace`
+  deletes a character (or cancels on an empty query), `Up`/`Down` move
+  through the matches, `Enter` keeps the filter and `Esc` cancels it.
+  With a kept filter, `Esc` clears it before acting as "back".
 - Any key dismisses a `notice` popup.
 
 Future keybindings belong here too.
@@ -314,6 +332,14 @@ rendering types. Dispatches on `App` state to one of three views:
   titled with `scanner.current_path()`, rendered statefully with
   `scanner.table_state` (same highlighting/auto-scroll behavior as the
   disk table).
+- Each full-screen view's top border is just its title ("DUV — <path>",
+  "DUV — disk usage visualizer", "DUV — error"), and its bottom border
+  lists the keys that work there (`key_hints`, e.g. "l open · h back ·
+  / filter · ...").
+- With a filter set, the scan view's bottom border shows it instead of the
+  key hints (`filter_line`): the query being typed with a cursor, or the kept query,
+  plus "N of M" matches and the relevant keys. An empty filtered list says
+  no entries match instead of "Empty directory."
 - `app.scanner_error` set — an error `Paragraph` instead of any of the
   above.
 - `app.delete_confirmation` / `app.quit_confirmation` set — a centered

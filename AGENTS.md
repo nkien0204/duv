@@ -41,7 +41,9 @@ kept on `App::scanner_history`. A confirmation popup appears when the user
 presses `q` to quit, allowing them to choose Yes or No. `d`/`Delete` asks
 (same kind of popup, defaulting to No) to move the highlighted entry to
 the Trash via the `trash` crate; on success it's removed from the current
-scan's tree and from every scan in `App::scanner_history`. See [ARCHITECTURE.md](./ARCHITECTURE.md)
+scan's tree and from every scan in `App::scanner_history`. `/` filters the
+current folder's entries by name as you type (`Scanner::set_filter`); the
+filter belongs to that folder and is dropped when navigating away. See [ARCHITECTURE.md](./ARCHITECTURE.md)
 for the full breakdown of each module and how they communicate — keep
 that document up to date alongside this one whenever the module structure
 changes.

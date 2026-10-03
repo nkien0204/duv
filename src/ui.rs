@@ -39,7 +39,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
 fn render_error(error: &str, frame: &mut Frame) {
     let block = Block::default()
-        .title("DUV — error (Esc/h to go back, q to quit)")
+        .title(" DUV — error ")
+        .title_bottom(key_hints(&[("h", "back"), ("q", "quit")]))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
@@ -54,7 +55,8 @@ fn render_error(error: &str, frame: &mut Frame) {
 
 fn render_disks(app: &mut App, frame: &mut Frame) {
     let block = Block::default()
-        .title("DUV — disk usage visualizer (j/k or ↑/↓ to move, s to scan, q to quit)")
+        .title(" DUV — disk usage visualizer ")
+        .title_bottom(key_hints(&[("j/k", "move"), ("s", "scan"), ("q", "quit")]))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
@@ -126,6 +128,7 @@ fn render_disks(app: &mut App, frame: &mut Frame) {
 }
 
 fn render_scan(app: &mut App, frame: &mut Frame) {
+    let typing_filter = app.filter_input;
     let Some(scanner) = &mut app.scanner else {
         return;
     };
@@ -133,9 +136,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
     let is_scanning = !scanner.finished;
 
     let mut block = Block::default()
-        .title(format!(
-            "DUV — {root} (l/Enter to open, h/Esc to go back, s to rescan, d to trash, q to quit)"
-        ))
+        .title(format!(" DUV — {root} "))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
@@ -143,10 +144,34 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
     if is_scanning {
         block = block.border_style(Style::default().fg(Color::DarkGray));
     }
+    // The bottom border shows the filter while one is set, key hints
+    // otherwise.
+    block = block.title_bottom(match scanner.filter_query() {
+        Some(query) => filter_line(
+            query,
+            typing_filter,
+            scanner.entry_count(),
+            scanner.unfiltered_count(),
+        ),
+        None => key_hints(&[
+            ("l", "open"),
+            ("h", "back"),
+            ("/", "filter"),
+            ("d", "trash"),
+            ("s", "rescan"),
+            ("q", "quit"),
+        ]),
+    });
 
     if scanner.entry_count() == 0 {
+        let message = match scanner.filter_query() {
+            Some(query) if scanner.unfiltered_count() > 0 => {
+                format!("No entries match \"{query}\".")
+            }
+            _ => "Empty directory.".to_string(),
+        };
         frame.render_widget(
-            Paragraph::new("Empty directory.")
+            Paragraph::new(message)
                 .block(block)
                 .style(if is_scanning {
                     Style::default().fg(Color::DarkGray)
@@ -227,6 +252,43 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         frame.render_widget(Clear, area);
         frame.render_widget(gauge, area);
     }
+}
+
+/// A left-aligned bottom border line of `(key, action)` hints, e.g.
+/// "l open · h back · q quit".
+fn key_hints(hints: &[(&str, &str)]) -> Line<'static> {
+    let key = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (keys, action)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        }
+        spans.push(Span::styled(keys.to_string(), key));
+        spans.push(Span::raw(format!(" {action}")));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans).left_aligned()
+}
+
+/// The bottom border line for a name filter: the query being typed (with
+/// a cursor) or applied, how many entries match, and the keys that matter.
+fn filter_line(query: &str, typing: bool, matches: usize, total: usize) -> Line<'static> {
+    let accent = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let (query_text, hint) = if typing {
+        (format!(" /{query}▏"), "Enter to keep, Esc to cancel ")
+    } else {
+        (format!(" filter: {query}"), "/ to edit, Esc to clear ")
+    };
+    Line::from(vec![
+        Span::styled(query_text, accent),
+        Span::styled(format!("  {matches} of {total}  "), dim),
+        Span::styled(hint, dim),
+    ])
 }
 
 fn render_quit_confirmation(app: &App, frame: &mut Frame) {
