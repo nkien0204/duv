@@ -7,6 +7,7 @@
 
 use sysinfo::Disks;
 
+#[cfg(target_os = "macos")]
 const MACOS_SYSTEM_VOLUMES_PREFIX: &str = "/System/Volumes/";
 
 /// A single mounted disk/volume, and the subset of its metadata `duv` cares

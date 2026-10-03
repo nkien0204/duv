@@ -1,5 +1,7 @@
 # duv (Disk Usage Visualizer)
 
+[![CI](https://github.com/nkien0204/duv/actions/workflows/ci.yml/badge.svg)](https://github.com/nkien0204/duv/actions/workflows/ci.yml)
+
 A fast terminal-based disk usage manager and monitor, written in Rust.
 
 `duv` scans directories, shows an interactive breakdown of what's consuming

@@ -40,11 +40,11 @@
 //! mounts, etc., wildly inflating totals beyond the disk's actual size.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -536,7 +536,9 @@ struct WalkCtx {
     next_token: Arc<AtomicU64>,
     /// `(device, inode)` of every multiply-linked file already counted in
     /// this job, so each hard-linked file is counted once (like `du`).
-    seen_links: Mutex<HashSet<(u64, u64)>>,
+    /// Unix only: other platforms don't expose inode numbers this way.
+    #[cfg(unix)]
+    seen_links: std::sync::Mutex<std::collections::HashSet<(u64, u64)>>,
 }
 
 impl WalkCtx {
@@ -544,7 +546,8 @@ impl WalkCtx {
         Self {
             root_dev,
             next_token,
-            seen_links: Mutex::new(HashSet::new()),
+            #[cfg(unix)]
+            seen_links: Default::default(),
         }
     }
 
@@ -554,7 +557,7 @@ impl WalkCtx {
     fn first_link(&self, dev: u64, ino: u64) -> bool {
         self.seen_links
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((dev, ino))
     }
 }
@@ -800,6 +803,8 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    // Elsewhere sizes are logical lengths, so a sparse file counts in full.
+    #[cfg(unix)]
     #[test]
     fn handles_sparse_files_correctly() {
         let dir = test_dir("sparse");
