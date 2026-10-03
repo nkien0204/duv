@@ -93,6 +93,13 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
   backing out. A failure sets `notice` instead.
 - `notice: Option<String>` — a message shown in a popup until the next
   key press (failed deletes, reveals and copies).
+- `sort: Sort` — the chosen order. `cycle_sort()` (`t`) moves to the next
+  column in its natural direction and `reverse_sort()` (`r`) flips the
+  direction; both apply it to the current scanner and every one in
+  `scanner_history`, and `spawn_scan` applies it to new scanners. The
+  status line (`sort_status`) names the new order and what `t` and `r` do
+  next, e.g. "Sorted by name (A to Z) · t: sort by modified time · r:
+  reverse order", and is guarded to fit an 80-column border.
 - `show_help: bool` — whether the key help popup (`?`) is open.
 - `status: Option<String>` — a short confirmation (e.g. "Copied /path")
   shown on the bottom border until the next key press.
@@ -157,9 +164,14 @@ human-readable size formatter used by `ui.rs`.
 `Tree` stores scanned files and directories in one flat `Vec<Node>`,
 addressed by `NodeId` (a `u32` index); nodes point to their parent and
 children by id rather than through nested allocations. Each `Node` keeps
-only its own name (`Box<str>`), its size, its parent, and its kind — full
-paths are rebuilt on demand by `Tree::path`, so no `PathBuf` is stored per
-node. A test guards `Node` at 64 bytes or less.
+only its own name (`Box<str>`), its size, its last modification time
+(`modified`, seconds since the Unix epoch as a `u32`; a directory's own
+time), its parent, and its kind — full paths are rebuilt on demand by
+`Tree::path`, so no `PathBuf` is stored per node. The parent link is stored
+as the parent's id plus one in an `Option<NonZeroU32>` (read it with
+`Node::parent()`), so it takes 4 bytes instead of 8; that's what let
+`modified` be added without growing the node. A test guards `Node` at 56
+bytes or less.
 
 A directory's `Children` say whether its entries are in memory:
 
@@ -233,13 +245,21 @@ file, or a scan is running). `go_up()` restores the parent view, including
 its selection and scroll position. `current_path()`, `entries()`,
 `entry_count()` and `selected_entry()` give the UI and `App` what to show.
 `set_filter(query)` / `clear_filter()` narrow the current directory to
-entries whose names contain `query`, ignoring case. All list reads
+entries whose names contain `query`, ignoring case, and `set_sort(Sort)`
+orders them. A `Sort` is a `SortBy` column — size (naturally largest
+first, the tree's own order), name (A to Z, ignoring case) or modification
+time (newest first) — plus `reversed`, which flips that natural direction;
+`Sort::ascending()` and `describe()` turn it into an arrow and words. Both feed one `view`
+list (`None` with no filter and the default sort, so that costs nothing), rebuilt by
+`rebuild_view` whenever the directory, filter, sort or entries change
+(including on each `poll` while a custom order is set). All list reads
 (`entries`, `entry_count`, `selected_entry`, `select`, `enter_selected`)
-go through one `visible()` list, so navigation, delete and drill-down act
-on the filtered rows. The filter belongs to the directory: `push_view` and
-`go_up` drop it, and `push_view` first converts the saved row position back
-to the unfiltered list so coming back highlights the same entry.
-`clear_filter` keeps the highlighted entry; `forget` refreshes the matches.
+go through `visible()`, so navigation, delete and drill-down act on what's
+shown. The filter belongs to the directory (`push_view` and `go_up` drop
+it); the sort applies everywhere. Saved parent views remember the
+highlighted entry by id rather than row number, so coming back highlights
+the same entry even if the sort changed meanwhile; `clear_filter` and
+`set_sort` keep the highlighted entry too.
 
 `forget(path, size)` updates the tree after a delete on disk: it removes
 the path's node, or subtracts `size` from the unloaded directory containing
@@ -339,6 +359,9 @@ both interaction styles are supported simultaneously. Currently handles:
 - `o` — show the highlighted row in the file manager
   (`App::reveal_selected`); `y` — copy its full path
   (`App::copy_selected_path`). Both work on the disk list too.
+- `t` — cycle the sort column: size, name, modified (`App::cycle_sort`);
+  `r` — reverse the direction (`App::reverse_sort`). Both are ignored on
+  the disk list.
 - `?` — open the key help popup (`App::show_help`); while it's open, any
   key closes it and does nothing else. While typing a filter, `?` is text.
 - Any key dismisses a `notice` popup, and clears any `status` message.
@@ -367,10 +390,12 @@ rendering types. Dispatches on `App` state to one of three views:
   `scanner.measured / scanner.total` subdirectories of the directory being
   scanned, over the entries found so far.
 - A finished scan — a `Table` of `scanner.entries()` for the directory
-  currently shown (name, Dir/File, size), sorted by size descending and
-  titled with `scanner.current_path()`, rendered statefully with
-  `scanner.table_state` (same highlighting/auto-scroll behavior as the
-  disk table).
+  currently shown (name, Dir/File, size, modified), in the scanner's sort
+  order (its column header gets an arrow: `↑` ascending, `↓` descending) and titled with
+  `scanner.current_path()`, rendered statefully with `scanner.table_state`
+  (same highlighting/auto-scroll behavior as the disk table). Modified is
+  shown as an age ("3 days ago", via `age`) rather than a date, since
+  formatting local dates would need a timezone library.
 - Each full-screen view's top border is just its title ("DUV — <path>",
   "DUV — disk usage visualizer", "DUV — error"), and its bottom border
   lists the keys that work there (`key_hints`, e.g. "l open · h back ·

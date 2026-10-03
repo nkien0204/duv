@@ -43,7 +43,10 @@ presses `q` to quit, allowing them to choose Yes or No. `d`/`Delete` asks
 the Trash via the `trash` crate; on success it's removed from the current
 scan's tree and from every scan in `App::scanner_history`. `/` filters the
 current folder's entries by name as you type (`Scanner::set_filter`); the
-filter belongs to that folder and is dropped when navigating away. `o`
+filter belongs to that folder and is dropped when navigating away. `t`
+cycles the sort column (size, name, modified) and `r` reverses its
+direction, for every folder and scan; each
+tree node stores its modification time. `o`
 shows the highlighted entry in the file manager and `y` copies its path;
 these and the Trash go through `src/desktop.rs`, which shells out to the
 platform's own tools (or OSC 52 over SSH) instead of adding GUI crates. See [ARCHITECTURE.md](./ARCHITECTURE.md)

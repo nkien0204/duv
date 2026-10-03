@@ -111,6 +111,8 @@ pub fn update(app: &mut App, key_event: KeyEvent) {
         }
         KeyCode::Char('/') => app.start_filter(),
         KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('t') => app.cycle_sort(),
+        KeyCode::Char('r') => app.reverse_sort(),
         KeyCode::Char('o') => app.reveal_selected(),
         KeyCode::Char('y') => app.copy_selected_path(),
         KeyCode::Esc => {
@@ -152,7 +154,7 @@ pub fn update(app: &mut App, key_event: KeyEvent) {
 mod tests {
     use super::*;
     use crate::disks::{DiskInfo, DiskKind};
-    use crate::scanner::DEFAULT_MEMORY_BUDGET;
+    use crate::scanner::{DEFAULT_MEMORY_BUDGET, Sort, SortBy};
     use std::{
         fs,
         path::PathBuf,
@@ -475,5 +477,97 @@ mod tests {
         assert_eq!(filter_query(&app).as_deref(), Some("?"));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn t_cycles_the_sort_for_every_scan() {
+        let (mut app, dir) = filter_app("sort");
+        let sort = |app: &App| app.scanner.as_ref().unwrap().sort().by;
+
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.sort, SortBy::Name.into());
+        assert_eq!(sort(&app), SortBy::Name);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("Sorted by name (A to Z) · t: sort by modified time · r: reverse order")
+        );
+        assert_eq!(
+            visible_names(&app),
+            ["alpha.txt", "beta.log", "gamma.TXT", "quick-delete.md"]
+        );
+
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(sort(&app), SortBy::Modified);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("Sorted by modified (newest first) · t: sort by size · r: reverse order")
+        );
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(sort(&app), SortBy::Size);
+
+        // A new scan starts with the chosen order.
+        press(&mut app, KeyCode::Char('t'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(sort(&app), SortBy::Name);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn t_is_ignored_on_the_disk_list() {
+        let mut app = App::new(DEFAULT_MEMORY_BUDGET);
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.sort, Sort::default());
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn r_reverses_the_order_and_t_starts_each_column_naturally() {
+        let (mut app, dir) = filter_app("sort-reverse");
+
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            app.sort,
+            Sort {
+                by: SortBy::Size,
+                reversed: true
+            }
+        );
+        assert_eq!(
+            app.status.as_deref(),
+            Some("Sorted by size (smallest first) · t: sort by name · r: reverse order")
+        );
+        assert_eq!(
+            visible_names(&app),
+            ["quick-delete.md", "gamma.TXT", "beta.log", "alpha.txt"]
+        );
+
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.sort, Sort::default());
+
+        // Switching columns resets to the column's natural direction.
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.sort, SortBy::Name.into());
+
+        // The direction carries over to new scans like the column does.
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(
+            app.scanner.as_ref().unwrap().sort(),
+            Sort {
+                by: SortBy::Name,
+                reversed: true
+            }
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn r_is_ignored_on_the_disk_list() {
+        let mut app = App::new(DEFAULT_MEMORY_BUDGET);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.sort, Sort::default());
     }
 }

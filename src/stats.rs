@@ -95,7 +95,7 @@ fn largest_top_level_branch(tree: &Tree) -> Option<(String, usize)> {
     let mut counts = vec![0usize; tree.node_capacity()];
     for (id, _) in tree.iter() {
         let mut current = id;
-        while let Some(parent) = tree.get(current).and_then(|node| node.parent) {
+        while let Some(parent) = tree.get(current).and_then(|node| node.parent()) {
             if parent == Tree::ROOT {
                 counts[current as usize] += 1;
                 break;

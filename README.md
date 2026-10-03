@@ -26,6 +26,13 @@ part of the name, so `.mp4` or `cache` both work). `Enter` keeps the
 filter and returns to navigation, `Esc` cancels or clears it, and opening
 or leaving the folder clears it too.
 
+`t` switches the order between size (largest first), name (A to Z) and
+last modified (newest first), and `r` reverses it (smallest first, Z to A,
+oldest first); the column header's arrow shows the direction (`↑`
+ascending, `↓` descending). The choice applies to every folder and new
+scans. The Modified column shows how long ago each entry changed (for a
+folder, when its own entries last changed).
+
 `o` opens the file manager with the entry selected (Finder, Explorer; on
 Linux, its folder via `xdg-open`). Where there's no desktop to show it on —
 over SSH, or on a server without a graphical display — it says so and
@@ -94,6 +101,8 @@ overhead).
 | `s`                             | Start/Rescan               |
 | `d` / `Delete`                  | Move to Trash (asks first) |
 | `/`                             | Filter current folder      |
+| `t`                             | Sort by size/name/modified |
+| `r`                             | Reverse the sort order     |
 | `o`                             | Show in file manager       |
 | `y`                             | Copy full path             |
 | `?`                             | Show all keys              |

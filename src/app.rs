@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::desktop;
 use crate::disks::{self, DiskInfo};
-use crate::scanner::{self, Enter, Scanner};
+use crate::scanner::{self, Enter, Scanner, Sort};
 
 /// The highlighted button in a Yes/No confirmation popup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,9 @@ pub struct App {
     /// A message to show in a popup until the next key press (e.g. a
     /// failed delete).
     pub notice: Option<String>,
+    /// How scan results are ordered; applies to every scan, including new
+    /// ones.
+    pub sort: Sort,
     /// Whether the key help popup (`?`) is open.
     pub show_help: bool,
     /// A short confirmation shown in place of the key hints until the next
@@ -110,6 +113,7 @@ impl Default for App {
             quit_confirmation: None,
             delete_confirmation: None,
             notice: None,
+            sort: Sort::default(),
             show_help: false,
             status: None,
             trash: desktop::move_to_trash,
@@ -210,6 +214,35 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Switches scan results to the next column (size, name, modified),
+    /// in its natural direction. No-op on the disk list.
+    pub fn cycle_sort(&mut self) {
+        self.apply_sort(self.sort.by.next().into());
+    }
+
+    /// Reverses the current order (e.g. largest first to smallest first).
+    /// No-op on the disk list.
+    pub fn reverse_sort(&mut self) {
+        self.apply_sort(Sort {
+            reversed: !self.sort.reversed,
+            ..self.sort
+        });
+    }
+
+    /// Uses `sort` in the current scan and every earlier one, so backing
+    /// out shows the same order, and for new scans. The status line names
+    /// the order and what `t` and `r` would do next.
+    fn apply_sort(&mut self, sort: Sort) {
+        if self.scanner.is_none() {
+            return;
+        }
+        self.sort = sort;
+        for scanner in self.scanner.iter_mut().chain(&mut self.scanner_history) {
+            scanner.set_sort(sort);
+        }
+        self.status = Some(sort_status(sort));
     }
 
     /// Starts typing a name filter for the current directory of a finished
@@ -426,7 +459,8 @@ impl App {
     /// or surfacing an error (on failure).
     fn spawn_scan(&mut self, root: PathBuf) {
         match Scanner::spawn(root, self.memory_budget) {
-            Ok(scanner) => {
+            Ok(mut scanner) => {
+                scanner.set_sort(self.sort);
                 self.scanner = Some(scanner);
                 self.scanner_error = None;
             }
@@ -436,6 +470,17 @@ impl App {
             }
         }
     }
+}
+
+/// The status line after changing the sort: the order now used, and what
+/// `t` and `r` would do next. Kept within an 80-column terminal's bottom
+/// border (see `ui.rs`'s `sort_status_fits_an_80_column_border`).
+pub fn sort_status(sort: Sort) -> String {
+    format!(
+        "Sorted by {} · t: sort by {} · r: reverse order",
+        sort.describe(),
+        sort.by.next().label()
+    )
 }
 
 #[cfg(test)]
