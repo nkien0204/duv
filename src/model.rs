@@ -69,6 +69,21 @@ pub enum Children {
     Unreadable,
 }
 
+/// Where a path sits in a [`Tree`], from [`Tree::lookup`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Lookup {
+    /// The path is this node.
+    Found(NodeId),
+    /// The path is somewhere under this unloaded directory, so its size is
+    /// included in the directory's total but it has no node of its own.
+    InsideUnloaded(NodeId),
+    /// The path is under a directory whose space isn't counted (another
+    /// filesystem, or unreadable).
+    NotCounted,
+    /// The path isn't under the root, or isn't in the tree.
+    Outside,
+}
+
 /// A directory tree rooted at `root_path`.
 #[derive(Debug)]
 pub struct Tree {
@@ -205,15 +220,89 @@ impl Tree {
     /// of its ancestors. Used before (re)loading its entries, which add
     /// their sizes back as they arrive.
     pub fn clear_size(&mut self, id: NodeId) {
-        let Some(node) = self.get_mut(id) else {
+        if let Some(size) = self.get(id).map(|node| node.size) {
+            self.subtract_size(id, size);
+        }
+    }
+
+    /// Subtracts `size` bytes from node `id` and all of its ancestors,
+    /// capped at the node's own size so no total goes below what's left.
+    pub fn subtract_size(&mut self, id: NodeId, size: u64) {
+        let Some(size) = self.get(id).map(|node| size.min(node.size)) else {
             return;
         };
-        let size = std::mem::take(&mut node.size);
-        let mut current = node.parent;
+        let mut current = Some(id);
         while let Some(node) = current.and_then(|id| self.get_mut(id)) {
-            node.size -= size;
+            node.size = node.size.saturating_sub(size);
             current = node.parent;
         }
+    }
+
+    /// Removes node `id` and everything under it (e.g. after it was deleted
+    /// from disk): its size is subtracted from its ancestors, it's dropped
+    /// from its parent's children, and all its slots are freed for reuse.
+    /// Calls `on_free` with each freed id. Returns the removed size, or
+    /// `None` for the root or a missing node.
+    pub fn remove(&mut self, id: NodeId, mut on_free: impl FnMut(NodeId)) -> Option<u64> {
+        let node = self.get(id)?;
+        let parent = node.parent?;
+        let size = node.size;
+
+        self.subtract_size(parent, size);
+        if let Some(Node {
+            kind: NodeKind::Dir(Children::Loaded(siblings)),
+            ..
+        }) = self.get_mut(parent)
+        {
+            siblings.retain(|&sibling| sibling != id);
+        }
+        self.evict_children(id, &mut on_free);
+        let node = std::mem::replace(
+            &mut self.nodes[id as usize],
+            Node {
+                name: "".into(),
+                size: 0,
+                parent: None,
+                kind: NodeKind::Free,
+            },
+        );
+        self.approx_bytes -= node_bytes(&node.name);
+        self.free.push(id);
+        on_free(id);
+        Some(size)
+    }
+
+    /// Finds where `path` sits in the tree, following loaded directories
+    /// down from the root by name.
+    pub fn lookup(&self, path: &Path) -> Lookup {
+        let Ok(relative) = path.strip_prefix(&self.root_path) else {
+            return Lookup::Outside;
+        };
+        let mut current = Self::ROOT;
+        for component in relative.components() {
+            let Some(node) = self.get(current) else {
+                return Lookup::Outside;
+            };
+            match &node.kind {
+                NodeKind::Dir(Children::Loaded(children)) => {
+                    let name = component.as_os_str().to_string_lossy();
+                    match children
+                        .iter()
+                        .copied()
+                        .find(|&child| self.get(child).is_some_and(|c| *c.name == *name))
+                    {
+                        Some(child) => current = child,
+                        None => return Lookup::Outside,
+                    }
+                }
+                NodeKind::Dir(Children::Unloaded) => return Lookup::InsideUnloaded(current),
+                NodeKind::Dir(Children::OtherFilesystem | Children::Unreadable) => {
+                    return Lookup::NotCounted;
+                }
+                NodeKind::File | NodeKind::Free => return Lookup::Outside,
+            }
+        }
+        Lookup::Found(current)
     }
 
     /// Sets directory `id`'s children state, e.g. to mark it
@@ -491,6 +580,73 @@ mod tests {
 
         tree.add_child(Tree::ROOT, "w", 1, NodeKind::File).unwrap();
         assert_eq!(tree.nodes.len(), len_before + 1);
+    }
+
+    #[test]
+    fn remove_drops_the_subtree_and_its_size() {
+        let (mut tree, a, sub, deep) = sample();
+        let b = tree.children(sub).unwrap()[0];
+        let before = tree.approx_bytes();
+
+        let mut freed = Vec::new();
+        assert_eq!(tree.remove(sub, |id| freed.push(id)), Some(105));
+        freed.sort();
+        assert_eq!(freed, [sub, b, deep]);
+
+        assert_eq!(tree.children(Tree::ROOT), Some(&[a][..]));
+        assert_eq!(size(&tree, Tree::ROOT), 10);
+        assert_eq!(tree.node_count(), 2);
+        assert!(tree.approx_bytes() < before);
+        assert!(tree.get(sub).is_none());
+
+        // Freed slots are reused.
+        let len = tree.nodes.len();
+        tree.add_child(Tree::ROOT, "new", 1, NodeKind::File)
+            .unwrap();
+        assert_eq!(tree.nodes.len(), len);
+    }
+
+    #[test]
+    fn remove_rejects_the_root() {
+        let (mut tree, _, _, _) = sample();
+        assert_eq!(tree.remove(Tree::ROOT, |_| {}), None);
+        assert_eq!(tree.node_count(), 5);
+    }
+
+    #[test]
+    fn subtract_size_saturates_at_zero() {
+        let (mut tree, _, sub, deep) = sample();
+        tree.subtract_size(deep, 1_000);
+        assert_eq!(size(&tree, deep), 0);
+        assert_eq!(size(&tree, sub), 100);
+        assert_eq!(size(&tree, Tree::ROOT), 110);
+    }
+
+    #[test]
+    fn lookup_follows_loaded_directories() {
+        let (mut tree, a, _, deep) = sample();
+        tree.add_child(
+            Tree::ROOT,
+            "mnt",
+            0,
+            NodeKind::Dir(Children::OtherFilesystem),
+        )
+        .unwrap();
+
+        assert_eq!(tree.lookup(Path::new("/data")), Lookup::Found(Tree::ROOT));
+        assert_eq!(tree.lookup(Path::new("/data/a.txt")), Lookup::Found(a));
+        assert_eq!(
+            tree.lookup(Path::new("/data/sub/deep")),
+            Lookup::Found(deep)
+        );
+        assert_eq!(
+            tree.lookup(Path::new("/data/sub/deep/x/y")),
+            Lookup::InsideUnloaded(deep)
+        );
+        assert_eq!(tree.lookup(Path::new("/data/mnt/x")), Lookup::NotCounted);
+        assert_eq!(tree.lookup(Path::new("/data/missing")), Lookup::Outside);
+        assert_eq!(tree.lookup(Path::new("/data/a.txt/x")), Lookup::Outside);
+        assert_eq!(tree.lookup(Path::new("/elsewhere")), Lookup::Outside);
     }
 
     #[test]

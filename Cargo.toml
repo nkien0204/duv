@@ -10,6 +10,7 @@ clap = { version = "4.6.7", default-features = false, features = ["derive", "std
 ratatui = "0.30"
 rayon = "1.12"
 sysinfo = { version = "0.39", default-features = false, features = ["disk"] }
+trash = "5.2.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -38,7 +38,10 @@ no rescanning (or a load in place for budget-skipped directories); only
 directories on another filesystem or unreadable ones spawn another
 `Scanner`, with the previous one
 kept on `App::scanner_history`. A confirmation popup appears when the user
-presses `q` to quit, allowing them to choose Yes or No. See [ARCHITECTURE.md](./ARCHITECTURE.md)
+presses `q` to quit, allowing them to choose Yes or No. `d`/`Delete` asks
+(same kind of popup, defaulting to No) to move the highlighted entry to
+the Trash via the `trash` crate; on success it's removed from the current
+scan's tree and from every scan in `App::scanner_history`. See [ARCHITECTURE.md](./ARCHITECTURE.md)
 for the full breakdown of each module and how they communicate — keep
 that document up to date alongside this one whenever the module structure
 changes.
@@ -47,12 +50,13 @@ changes.
   `anyhow` (error propagation), `clap` (`duv [path]` parsing in `src/cli.rs`,
   minimal feature set), `sysinfo` (disk/volume enumeration only,
   via `default-features = false, features = ["disk"]`), `rayon`
-  (parallel directory-size scanning), `libc` (Unix only, peak memory for
-  the hidden `--stats` developer flag).
+  (parallel directory-size scanning), `trash` (moving entries to the
+  system Trash), `libc` (Unix only, peak memory for the hidden `--stats`
+  developer flag).
 - Disk enumeration (`src/disks.rs`), full-tree directory scanning
   (`src/scanner.rs`) into a memory-budgeted in-memory tree
-  (`src/model.rs`), and drill-down navigation of that tree exist; no
-  delete/manage actions yet.
+  (`src/model.rs`), drill-down navigation of that tree, and moving entries
+  to the Trash exist; no other manage actions yet.
 - Keybindings support both vim-style (`j`/`k`/`h`/`l`) and non-vim (arrow
   keys, `Enter`, `Backspace`) navigation for the same actions.
 
