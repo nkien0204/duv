@@ -71,6 +71,10 @@ overhead).
 | Key                             | Action                     |
 | ------------------------------- | -------------------------- |
 | `j` / `k` / `↓` / `↑`           | Move selection             |
+| `g` `g` / `Home`                | Jump to first row          |
+| `G` / `End`                     | Jump to last row           |
+| `PgDn` / `PgUp`                 | Move one page down / up    |
+| `Ctrl+d` / `Ctrl+u`             | Move half a page down / up |
 | `l` / `Enter` / `→`             | Open directory             |
 | `h` / `Backspace` / `←` / `Esc` | Go back / Cancel           |
 | `s`                             | Start/Rescan               |

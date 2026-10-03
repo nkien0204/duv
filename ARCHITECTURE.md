@@ -77,6 +77,9 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
   within the current scanner, then pops this stack, then falls back to
   the disk list.
 - `memory_budget: usize` — passed to every `Scanner` it spawns.
+- `page_size: usize` — list rows visible on screen, written by `ui.rs` on
+  every render, so page jumps match what's on screen.
+- `pending_g: bool` — the first half of a `gg` key sequence.
 - `delete_confirmation: Option<DeleteRequest>` — the entry (path, name,
   size, kind) the user asked to move to the Trash, and the highlighted
   `Choice` (defaults to `No`). `request_delete()` opens it for the
@@ -264,7 +267,14 @@ both interaction styles are supported simultaneously. Currently handles:
 - `j`/`Down`, `k`/`Up` — move the disk-list selection when no scan is
   open, or the current scan's row selection once it's finished
   (`App::select_next`/`App::select_previous` vs. `Scanner::select_next`/
-  `Scanner::select_previous`).
+  `Scanner::select_previous`). These wrap around at either end.
+- `gg` / `Home`, `G` / `End` — jump to the first or last row;
+  `PgDn` / `PgUp` — move one screen of rows; `Ctrl+d` / `Ctrl+u` — move
+  half a screen. All go through `App::jump(Jump)`, which stops at the ends
+  instead of wrapping, works on the disk list or a finished scan (like
+  `j`/`k`), and sizes pages from `App::page_size`. `gg` is a two-key
+  sequence: a lone `g` sets `App::pending_g`, and any other key clears it.
+  The `Ctrl` arms are matched before plain `d` (delete).
 - `l` / `Right` / `Enter` — drill into the selected entry if it's a
   directory (`App::enter_selected`), straight from the tree when its
   contents are loaded.
@@ -276,7 +286,7 @@ both interaction styles are supported simultaneously. Currently handles:
   `Backspace` cancel.
 - Any key dismisses a `notice` popup.
 
-Future additions (`gg`/`G`, `Home`/`End`, etc.) belong here too.
+Future keybindings belong here too.
 
 ### `ui.rs` — View
 
@@ -285,7 +295,8 @@ reads `App`/`Scanner` state and produces widgets. It takes `&mut App`
 because ratatui's stateful widgets (`TableState`) need a mutable reference
 to record their scroll offset between frames — no application-level state
 (selection, scan results, etc.) is mutated here, only rendering-owned
-scroll bookkeeping. Keeping this a free function (rather than
+bookkeeping: table scroll offsets, and `App::page_size` (the number of
+visible list rows, used by page jumps). Keeping this a free function (rather than
 `impl Widget for &App`) keeps `app.rs` fully decoupled from ratatui's
 rendering types. Dispatches on `App` state to one of three views:
 

@@ -297,6 +297,13 @@ impl Scanner {
         self.tree.children(self.current).unwrap_or(&[])
     }
 
+    /// Highlights entry `index` of the current directory, clamped to the
+    /// last entry.
+    pub fn select(&mut self, index: usize) {
+        self.selected = index.min(self.entry_count().saturating_sub(1));
+        self.table_state.select(Some(self.selected));
+    }
+
     /// Moves the selection to the next entry, wrapping at the end.
     pub fn select_next(&mut self) {
         let count = self.entry_count();
