@@ -27,6 +27,18 @@ pub struct DeleteRequest {
     pub choice: Choice,
 }
 
+/// A jump of the highlighted row in the list being shown. Unlike stepping
+/// with `j`/`k`, jumps stop at either end instead of wrapping around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jump {
+    First,
+    Last,
+    PageUp,
+    PageDown,
+    HalfPageUp,
+    HalfPageDown,
+}
+
 /// Moves a file or directory to the Trash (or the platform equivalent).
 pub type TrashFn = fn(&Path) -> Result<(), String>;
 
@@ -61,6 +73,12 @@ pub struct App {
     /// whose contents weren't collected (another filesystem, or
     /// unreadable), or rescanning a subdirectory with `s`.
     pub scanner_history: Vec<Scanner>,
+    /// Number of list rows visible on screen, as of the last render. Sets
+    /// how far page jumps move.
+    pub page_size: usize,
+    /// Whether the previous key was a lone `g`, so a second `g` jumps to
+    /// the first row (vim's `gg`).
+    pub pending_g: bool,
     /// Memory budget for each scan's tree, in bytes (see `scanner.rs`).
     pub memory_budget: usize,
     /// Set if the most recent scan attempt failed to even list its root
@@ -81,6 +99,8 @@ impl Default for App {
             disks_table_state: ratatui::widgets::TableState::default().with_selected(Some(0)),
             scanner: None,
             scanner_history: Vec::new(),
+            page_size: 10,
+            pending_g: false,
             memory_budget: scanner::DEFAULT_MEMORY_BUDGET,
             scanner_error: None,
         }
@@ -135,6 +155,39 @@ impl App {
         }
         self.selected = self.selected.checked_sub(1).unwrap_or(self.disks.len() - 1);
         self.disks_table_state.select(Some(self.selected));
+    }
+
+    /// Moves the highlighted row of the list being shown — the current
+    /// directory's entries once a scan has finished, or the disk list —
+    /// by `jump`. No-op while scanning or on an empty list.
+    pub fn jump(&mut self, jump: Jump) {
+        let page = self.page_size.max(1);
+        let half = (page / 2).max(1);
+        let target = |selected: usize, count: usize| -> Option<usize> {
+            let last = count.checked_sub(1)?;
+            Some(match jump {
+                Jump::First => 0,
+                Jump::Last => last,
+                Jump::PageUp => selected.saturating_sub(page),
+                Jump::PageDown => (selected + page).min(last),
+                Jump::HalfPageUp => selected.saturating_sub(half),
+                Jump::HalfPageDown => (selected + half).min(last),
+            })
+        };
+        match &mut self.scanner {
+            Some(scanner) if scanner.finished => {
+                if let Some(index) = target(scanner.selected, scanner.entry_count()) {
+                    scanner.select(index);
+                }
+            }
+            Some(_) => {}
+            None => {
+                if let Some(index) = target(self.selected, self.disks.len()) {
+                    self.selected = index;
+                    self.disks_table_state.select(Some(index));
+                }
+            }
+        }
     }
 
     /// Returns the currently selected disk, if any.

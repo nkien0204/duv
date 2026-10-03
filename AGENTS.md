@@ -57,8 +57,9 @@ changes.
   (`src/scanner.rs`) into a memory-budgeted in-memory tree
   (`src/model.rs`), drill-down navigation of that tree, and moving entries
   to the Trash exist; no other manage actions yet.
-- Keybindings support both vim-style (`j`/`k`/`h`/`l`) and non-vim (arrow
-  keys, `Enter`, `Backspace`) navigation for the same actions.
+- Keybindings support both vim-style (`j`/`k`/`h`/`l`, `gg`/`G`,
+  `Ctrl+d`/`Ctrl+u`) and non-vim (arrow keys, `Enter`, `Backspace`,
+  `Home`/`End`, `PgUp`/`PgDn`) navigation for the same actions.
 
 ## Planned architecture
 

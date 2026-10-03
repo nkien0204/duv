@@ -15,6 +15,9 @@ use crate::app::{App, Choice, DeleteRequest};
 use crate::disks::format_bytes;
 
 pub fn render(app: &mut App, frame: &mut Frame) {
+    // Both tables fill the screen: rows minus the border and header.
+    app.page_size = usize::from(frame.area().height.saturating_sub(3)).max(1);
+
     if let Some(error) = app.scanner_error.clone() {
         render_error(&error, frame);
     } else if app.scanner.is_some() {
