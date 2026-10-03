@@ -21,7 +21,10 @@
 //! sizes. [`Tree::add_child`] and [`Tree::add_size`] maintain this by
 //! adding every size change to all of the node's ancestors.
 
-use std::path::{Path, PathBuf};
+use std::{
+    num::NonZeroU32,
+    path::{Path, PathBuf},
+};
 
 /// Index of a [`Node`] within its [`Tree`].
 pub type NodeId = u32;
@@ -33,12 +36,32 @@ pub struct Node {
     pub name: Box<str>,
     /// Size in bytes: a file's length, or a directory's recursive total.
     pub size: u64,
-    /// `None` only for the root (and free slots).
-    pub parent: Option<NodeId>,
+    /// Last modification time in seconds since the Unix epoch, or `0` if
+    /// unknown. A directory's own time (when its entries last changed), not
+    /// that of anything inside it.
+    pub modified: u32,
+    /// The parent's id plus one, so `None` fits in the same 4 bytes (`None`
+    /// only for the root and free slots). Read it with [`Node::parent`].
+    parent: Option<NonZeroU32>,
     pub kind: NodeKind,
 }
 
 impl Node {
+    /// The parent directory's id; `None` for the root.
+    pub fn parent(&self) -> Option<NodeId> {
+        self.parent.map(|link| link.get() - 1)
+    }
+
+    fn free_slot() -> Self {
+        Self {
+            name: "".into(),
+            size: 0,
+            modified: 0,
+            parent: None,
+            kind: NodeKind::Free,
+        }
+    }
+
     pub fn is_dir(&self) -> bool {
         matches!(self.kind, NodeKind::Dir(_))
     }
@@ -105,6 +128,7 @@ impl Tree {
         let root = Node {
             name: "".into(),
             size: 0,
+            modified: 0,
             parent: None,
             kind: NodeKind::Dir(Children::Unloaded),
         };
@@ -179,7 +203,10 @@ impl Tree {
     ) -> Option<NodeId> {
         let id = match self.free.last() {
             Some(&id) => id,
-            None => NodeId::try_from(self.nodes.len()).ok()?,
+            // `u32::MAX` is left unused so every id's parent link fits.
+            None => NodeId::try_from(self.nodes.len())
+                .ok()
+                .filter(|&id| id < NodeId::MAX)?,
         };
         let children = match &mut self.get_mut(parent)?.kind {
             NodeKind::Dir(children) => children,
@@ -195,7 +222,8 @@ impl Tree {
         let node = Node {
             name,
             size: 0,
-            parent: Some(parent),
+            modified: 0,
+            parent: NonZeroU32::new(parent + 1),
             kind,
         };
         if self.free.pop().is_some() {
@@ -212,7 +240,7 @@ impl Tree {
         let mut current = Some(id);
         while let Some(node) = current.and_then(|id| self.get_mut(id)) {
             node.size += size;
-            current = node.parent;
+            current = node.parent();
         }
     }
 
@@ -234,7 +262,7 @@ impl Tree {
         let mut current = Some(id);
         while let Some(node) = current.and_then(|id| self.get_mut(id)) {
             node.size = node.size.saturating_sub(size);
-            current = node.parent;
+            current = node.parent();
         }
     }
 
@@ -245,7 +273,7 @@ impl Tree {
     /// `None` for the root or a missing node.
     pub fn remove(&mut self, id: NodeId, mut on_free: impl FnMut(NodeId)) -> Option<u64> {
         let node = self.get(id)?;
-        let parent = node.parent?;
+        let parent = node.parent()?;
         let size = node.size;
 
         self.subtract_size(parent, size);
@@ -257,15 +285,7 @@ impl Tree {
             siblings.retain(|&sibling| sibling != id);
         }
         self.evict_children(id, &mut on_free);
-        let node = std::mem::replace(
-            &mut self.nodes[id as usize],
-            Node {
-                name: "".into(),
-                size: 0,
-                parent: None,
-                kind: NodeKind::Free,
-            },
-        );
+        let node = std::mem::replace(&mut self.nodes[id as usize], Node::free_slot());
         self.approx_bytes -= node_bytes(&node.name);
         self.free.push(id);
         on_free(id);
@@ -303,6 +323,14 @@ impl Tree {
             }
         }
         Lookup::Found(current)
+    }
+
+    /// Records node `id`'s last modification time (seconds since the Unix
+    /// epoch).
+    pub fn set_modified(&mut self, id: NodeId, modified: u32) {
+        if let Some(node) = self.get_mut(id) {
+            node.modified = modified;
+        }
     }
 
     /// Sets directory `id`'s children state, e.g. to mark it
@@ -344,15 +372,7 @@ impl Tree {
         };
         let mut freed = 0;
         while let Some(child) = stack.pop() {
-            let node = std::mem::replace(
-                &mut self.nodes[child as usize],
-                Node {
-                    name: "".into(),
-                    size: 0,
-                    parent: None,
-                    kind: NodeKind::Free,
-                },
-            );
+            let node = std::mem::replace(&mut self.nodes[child as usize], Node::free_slot());
             if let NodeKind::Dir(Children::Loaded(grandchildren)) = node.kind {
                 stack.extend(grandchildren);
             }
@@ -393,7 +413,7 @@ impl Tree {
     pub fn path(&self, id: NodeId) -> Option<PathBuf> {
         let mut names = Vec::new();
         let mut current = self.get(id)?;
-        while let Some(parent) = current.parent {
+        while let Some(parent) = current.parent() {
             names.push(&*current.name);
             current = self.get(parent)?;
         }
@@ -652,8 +672,10 @@ mod tests {
     #[test]
     fn node_stays_small() {
         // Guards against accidentally bloating every node in large scans.
+        // Adding the modification time kept nodes at 56 bytes by packing
+        // the parent link into 4.
         assert!(
-            std::mem::size_of::<Node>() <= 64,
+            std::mem::size_of::<Node>() <= 56,
             "{}",
             std::mem::size_of::<Node>()
         );

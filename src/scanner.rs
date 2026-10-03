@@ -87,7 +87,13 @@ pub struct Scanner {
     current: NodeId,
     /// A name filter narrowing the entries of `current`, if one is set.
     /// Cleared when moving to another directory.
-    filter: Option<Filter>,
+    filter: Option<String>,
+    /// How entries are ordered. Unlike the filter, it applies to every
+    /// directory.
+    sort: Sort,
+    /// `current`'s entries as shown, when that isn't simply the tree's
+    /// largest-first order (a filter or another sort is set).
+    view: Option<Vec<NodeId>>,
     /// Directories above `current` that were drilled through, with their
     /// selection and scroll state, innermost last.
     parents: Vec<SavedView>,
@@ -106,19 +112,82 @@ pub struct Scanner {
     rx: Option<mpsc::Receiver<Msg>>,
 }
 
-/// A name filter on the current directory's entries.
-struct Filter {
-    /// What the user typed.
-    query: String,
-    /// Entries of the current directory whose names contain `query`
-    /// (ignoring case), in display order.
-    matches: Vec<NodeId>,
+/// What a directory's entries are ordered by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SortBy {
+    /// Size; naturally largest first (the tree's own order).
+    #[default]
+    Size,
+    /// Name, ignoring case; naturally A to Z.
+    Name,
+    /// Modification time; naturally newest first.
+    Modified,
+}
+
+impl SortBy {
+    /// What the column is, e.g. for "t: sort by modified time".
+    pub fn label(self) -> &'static str {
+        match self {
+            SortBy::Size => "size",
+            SortBy::Name => "name",
+            SortBy::Modified => "modified time",
+        }
+    }
+
+    /// The next column in the `t` cycle: size, name, modified, size, ...
+    pub fn next(self) -> Self {
+        match self {
+            SortBy::Size => SortBy::Name,
+            SortBy::Name => SortBy::Modified,
+            SortBy::Modified => SortBy::Size,
+        }
+    }
+}
+
+/// A full ordering: the column, and whether it's reversed from that
+/// column's natural direction (largest, A to Z, newest first).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sort {
+    pub by: SortBy,
+    pub reversed: bool,
+}
+
+impl From<SortBy> for Sort {
+    fn from(by: SortBy) -> Self {
+        Self {
+            by,
+            reversed: false,
+        }
+    }
+}
+
+impl Sort {
+    /// Whether values go up down the list (A to Z, smallest or oldest
+    /// first).
+    pub fn ascending(self) -> bool {
+        let natural_ascending = self.by == SortBy::Name;
+        natural_ascending != self.reversed
+    }
+
+    /// A short description, e.g. for "Sorted by name (Z to A)".
+    pub fn describe(self) -> &'static str {
+        match (self.by, self.ascending()) {
+            (SortBy::Size, false) => "size (largest first)",
+            (SortBy::Size, true) => "size (smallest first)",
+            (SortBy::Name, true) => "name (A to Z)",
+            (SortBy::Name, false) => "name (Z to A)",
+            (SortBy::Modified, false) => "modified (newest first)",
+            (SortBy::Modified, true) => "modified (oldest first)",
+        }
+    }
 }
 
 /// A directory view to restore when going back up.
 struct SavedView {
     dir: NodeId,
-    selected: usize,
+    /// The highlighted entry, kept by identity rather than row number so
+    /// it's found again even if the sort changed meanwhile.
+    selected: Option<NodeId>,
     table_state: ratatui::widgets::TableState,
 }
 
@@ -144,6 +213,8 @@ enum Msg {
 /// One directory entry found by the walk.
 struct Entry {
     name: Box<str>,
+    /// Last modification time, seconds since the Unix epoch (`0` if unknown).
+    modified: u32,
     kind: EntryKind,
 }
 
@@ -193,6 +264,8 @@ impl Scanner {
             table_state: ratatui::widgets::TableState::default().with_selected(Some(0)),
             current: Tree::ROOT,
             filter: None,
+            sort: Sort::default(),
+            view: None,
             parents: Vec::new(),
             job_dir: Tree::ROOT,
             pending: HashMap::new(),
@@ -231,6 +304,10 @@ impl Scanner {
             self.finish_job();
         } else {
             self.rx = Some(rx);
+            // Keep a custom order up to date as entries arrive.
+            if self.view.is_some() {
+                self.rebuild_view();
+            }
         }
     }
 
@@ -295,7 +372,7 @@ impl Scanner {
                 self.tree.remove(id, |freed| {
                     last_visit.remove(&freed);
                 });
-                self.refresh_filter();
+                self.rebuild_view();
                 let count = self.entry_count();
                 self.selected = self.selected.min(count.saturating_sub(1));
                 self.table_state.select(Some(self.selected));
@@ -305,11 +382,10 @@ impl Scanner {
         }
     }
 
-    /// The current directory's entries as shown: all of them, or only the
-    /// filter's matches.
+    /// The current directory's entries as shown: filtered and ordered.
     fn visible(&self) -> &[NodeId] {
-        match &self.filter {
-            Some(filter) => &filter.matches,
+        match &self.view {
+            Some(view) => view,
             None => self.all_children(),
         }
     }
@@ -320,7 +396,7 @@ impl Scanner {
 
     /// The active filter's query, if any.
     pub fn filter_query(&self) -> Option<&str> {
-        self.filter.as_ref().map(|filter| filter.query.as_str())
+        self.filter.as_deref()
     }
 
     /// Number of entries in the current directory, ignoring the filter.
@@ -335,53 +411,84 @@ impl Scanner {
         if !self.finished {
             return;
         }
-        self.filter = Some(Filter {
-            query: query.to_string(),
-            matches: Vec::new(),
-        });
-        self.refresh_filter();
+        self.filter = Some(query.to_string());
+        self.rebuild_view();
         self.select(0);
     }
 
     /// Removes the filter, keeping the highlighted entry highlighted.
     pub fn clear_filter(&mut self) {
-        let index = self.unfiltered_selected();
+        let selected = self.selected_id();
         if self.filter.take().is_some() {
+            self.rebuild_view();
             self.table_state = ratatui::widgets::TableState::default();
-            self.select(index);
+            self.reselect(selected);
         }
     }
 
-    /// Recomputes the filter's matches from the current directory.
-    fn refresh_filter(&mut self) {
-        let Some(query) = self.filter.as_ref().map(|f| f.query.to_lowercase()) else {
+    /// The current order.
+    pub fn sort(&self) -> Sort {
+        self.sort
+    }
+
+    /// Orders entries by `sort` from now on, in every directory, keeping
+    /// the highlighted entry highlighted.
+    pub fn set_sort(&mut self, sort: Sort) {
+        let selected = self.selected_id();
+        self.sort = sort;
+        self.rebuild_view();
+        self.reselect(selected);
+    }
+
+    /// Recomputes `view` from the current directory, the filter and the
+    /// sort. Ties keep the tree's largest-first order (the sort is stable).
+    fn rebuild_view(&mut self) {
+        if self.filter.is_none() && self.sort == Sort::default() {
+            self.view = None;
             return;
-        };
-        let matches = self
+        }
+        let query = self.filter.as_deref().map(str::to_lowercase);
+        let tree = &self.tree;
+        let mut ids: Vec<NodeId> = self
             .all_children()
             .iter()
             .copied()
-            .filter(|&id| {
-                self.tree
+            .filter(|&id| match &query {
+                Some(query) => tree
                     .get(id)
-                    .is_some_and(|node| node.name.to_lowercase().contains(&query))
+                    .is_some_and(|node| node.name.to_lowercase().contains(query)),
+                None => true,
             })
             .collect();
-        if let Some(filter) = &mut self.filter {
-            filter.matches = matches;
+        match self.sort.by {
+            SortBy::Size => {}
+            SortBy::Name => {
+                ids.sort_by_cached_key(|&id| tree.get(id).map(|node| node.name.to_lowercase()));
+            }
+            SortBy::Modified => {
+                ids.sort_by_key(|&id| {
+                    std::cmp::Reverse(tree.get(id).map_or(0, |node| node.modified))
+                });
+            }
         }
+        if self.sort.reversed {
+            ids.reverse();
+        }
+        self.view = Some(ids);
     }
 
-    /// Index of the highlighted entry within all of the current
-    /// directory's entries (the filter's matches are a subset of them).
-    fn unfiltered_selected(&self) -> usize {
-        let Some(&id) = self.visible().get(self.selected) else {
-            return 0;
-        };
-        self.all_children()
-            .iter()
-            .position(|&child| child == id)
-            .unwrap_or(0)
+    /// The highlighted entry's id.
+    fn selected_id(&self) -> Option<NodeId> {
+        self.visible().get(self.selected).copied()
+    }
+
+    /// Highlights entry `id` wherever it now is, or the first row if it's
+    /// not shown.
+    fn reselect(&mut self, id: Option<NodeId>) {
+        let index = id
+            .and_then(|id| self.visible().iter().position(|&shown| shown == id))
+            .unwrap_or(0);
+        self.select(index);
     }
 
     /// Highlights entry `index` of the current directory, clamped to the
@@ -459,27 +566,29 @@ impl Scanner {
         };
         self.filter = None;
         self.current = view.dir;
-        self.selected = view.selected;
         self.table_state = view.table_state;
+        self.rebuild_view();
+        self.reselect(view.selected);
         self.record_visit(self.current);
         true
     }
 
     fn push_view(&mut self, dir: NodeId) {
-        // The saved position must refer to the unfiltered list, which is
-        // what's shown when coming back.
-        self.clear_filter();
+        let selected = self.selected_id();
         let table_state = std::mem::replace(
             &mut self.table_state,
             ratatui::widgets::TableState::default().with_selected(Some(0)),
         );
         self.parents.push(SavedView {
             dir: self.current,
-            selected: self.selected,
+            selected,
             table_state,
         });
+        // The filter belongs to the directory being left.
+        self.filter = None;
         self.current = dir;
         self.selected = 0;
+        self.rebuild_view();
         self.record_visit(dir);
     }
 
@@ -489,7 +598,7 @@ impl Scanner {
         let mut current = Some(dir);
         while let Some(id) = current {
             self.last_visit.insert(id, self.clock);
-            current = self.tree.get(id).and_then(|node| node.parent);
+            current = self.tree.get(id).and_then(|node| node.parent());
         }
     }
 
@@ -503,7 +612,7 @@ impl Scanner {
             return;
         }
         let mut path = vec![self.current];
-        while let Some(parent) = path.last().and_then(|&id| self.tree.get(id)?.parent) {
+        while let Some(parent) = path.last().and_then(|&id| self.tree.get(id)?.parent()) {
             path.push(parent);
         }
         let mut candidates: Vec<(u64, NodeId)> = path
@@ -564,6 +673,7 @@ impl Scanner {
         self.pending.shrink_to_fit();
         self.tree.sort_subtree_by_size(self.job_dir);
         self.tree.shrink_to_fit();
+        self.rebuild_view();
     }
 
     fn handle(&mut self, msg: Msg) {
@@ -587,11 +697,14 @@ impl Scanner {
     /// Adds `entries` to the tree as `dir`'s children.
     fn store_listing(&mut self, dir: NodeId, entries: Vec<Entry>) {
         self.tree.mark_loaded(dir);
-        for Entry { name, kind } in entries {
-            match kind {
-                EntryKind::File(size) => {
-                    self.tree.add_child(dir, name, size, NodeKind::File);
-                }
+        for Entry {
+            name,
+            modified,
+            kind,
+        } in entries
+        {
+            let child = match kind {
+                EntryKind::File(size) => self.tree.add_child(dir, name, size, NodeKind::File),
                 EntryKind::Dir(token) => {
                     let child =
                         self.tree
@@ -599,11 +712,15 @@ impl Scanner {
                     // If the tree can't take another node, keep the size.
                     let pending = child.map_or(Pending::Fold(dir), Pending::Load);
                     self.pending.insert(token, pending);
+                    child
                 }
                 EntryKind::OtherFilesystem => {
                     self.tree
-                        .add_child(dir, name, 0, NodeKind::Dir(Children::OtherFilesystem));
+                        .add_child(dir, name, 0, NodeKind::Dir(Children::OtherFilesystem))
                 }
+            };
+            if let Some(child) = child {
+                self.tree.set_modified(child, modified);
             }
         }
     }
@@ -708,28 +825,66 @@ fn list_entry(entry: &fs::DirEntry, ctx: &WalkCtx) -> Option<(Entry, Option<Subd
         return None;
     }
     let name = entry.file_name().to_string_lossy().into();
+    // One metadata read per entry serves the device check, the size and
+    // the modification time. If it fails, the entry still counts (as an
+    // empty file, or a directory on the same filesystem).
+    let metadata = entry.metadata().ok();
+    let modified = metadata.as_ref().map_or(0, modified_secs);
     if file_type.is_dir() {
-        let path = entry.path();
-        if crosses_filesystem_boundary(&path, ctx.root_dev) {
+        if metadata
+            .as_ref()
+            .is_some_and(|m| crosses_filesystem_boundary(m, ctx.root_dev))
+        {
             let kind = EntryKind::OtherFilesystem;
-            return Some((Entry { name, kind }, None));
+            return Some((
+                Entry {
+                    name,
+                    modified,
+                    kind,
+                },
+                None,
+            ));
         }
         let token = ctx.next_token.fetch_add(1, Ordering::Relaxed);
         let kind = EntryKind::Dir(token);
-        return Some((Entry { name, kind }, Some((token, path))));
+        return Some((
+            Entry {
+                name,
+                modified,
+                kind,
+            },
+            Some((token, entry.path())),
+        ));
     }
     // On-disk size (allocated blocks), so sparse files aren't overcounted;
     // extra links to a file already counted add nothing.
     #[cfg(unix)]
-    let size = match entry.metadata() {
-        Ok(m) if m.nlink() > 1 && !ctx.first_link(m.dev(), m.ino()) => 0,
-        Ok(m) => m.blocks() * 512,
-        Err(_) => 0,
+    let size = match &metadata {
+        Some(m) if m.nlink() > 1 && !ctx.first_link(m.dev(), m.ino()) => 0,
+        Some(m) => m.blocks() * 512,
+        None => 0,
     };
     #[cfg(not(unix))]
-    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+    let size = metadata.as_ref().map_or(0, fs::Metadata::len);
     let kind = EntryKind::File(size);
-    Some((Entry { name, kind }, None))
+    Some((
+        Entry {
+            name,
+            modified,
+            kind,
+        },
+        None,
+    ))
+}
+
+/// `metadata`'s modification time in whole seconds since the Unix epoch,
+/// clamped to what fits in a `u32` (`0` if unknown or before 1970).
+fn modified_secs(metadata: &fs::Metadata) -> u32 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |age| u32::try_from(age.as_secs()).unwrap_or(u32::MAX))
 }
 
 /// The device/filesystem id of `path`, if it can be determined. `None` on
@@ -745,14 +900,17 @@ fn device_id(_path: &Path) -> Option<u64> {
     None
 }
 
-/// Whether `path` lives on a different filesystem than `root_dev`.
-/// Always `false` if `root_dev` is `None` (unknown / unsupported
-/// platform), which preserves the old behavior there.
-fn crosses_filesystem_boundary(path: &Path, root_dev: Option<u64>) -> bool {
-    match root_dev {
-        Some(root_dev) => device_id(path).is_some_and(|dev| dev != root_dev),
-        None => false,
-    }
+/// Whether the entry with `metadata` lives on a different filesystem than
+/// `root_dev`. Always `false` if `root_dev` is `None` (unknown /
+/// unsupported platform), which preserves the old behavior there.
+#[cfg(unix)]
+fn crosses_filesystem_boundary(metadata: &fs::Metadata, root_dev: Option<u64>) -> bool {
+    root_dev.is_some_and(|root_dev| metadata.dev() != root_dev)
+}
+
+#[cfg(not(unix))]
+fn crosses_filesystem_boundary(_metadata: &fs::Metadata, _root_dev: Option<u64>) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -1142,6 +1300,180 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Sets `path`'s modification time to `secs` after the Unix epoch.
+    fn set_mtime(path: &Path, secs: u64) {
+        let time = std::time::UNIX_EPOCH + Duration::from_secs(secs);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    /// root/
+    /// ├── b.txt   largest, oldest
+    /// ├── c.txt   middle
+    /// ├── A.txt   smallest, newest
+    /// └── sub/
+    ///     ├── z.txt (newest)
+    ///     └── y.txt
+    fn sort_dir(name: &str) -> PathBuf {
+        let dir = test_dir(name);
+        write_file(&dir.join("b.txt"), &[0u8; 40_000]);
+        write_file(&dir.join("c.txt"), &[0u8; 20_000]);
+        write_file(&dir.join("A.txt"), b"x");
+        set_mtime(&dir.join("b.txt"), 1_000_000_000);
+        set_mtime(&dir.join("c.txt"), 1_500_000_000);
+        set_mtime(&dir.join("A.txt"), 1_700_000_000);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        write_file(&dir.join("sub").join("y.txt"), &[0u8; 30_000]);
+        write_file(&dir.join("sub").join("z.txt"), b"z");
+        set_mtime(&dir.join("sub").join("y.txt"), 1_100_000_000);
+        set_mtime(&dir.join("sub").join("z.txt"), 1_600_000_000);
+        dir
+    }
+
+    fn file_names(scanner: &Scanner) -> Vec<String> {
+        scanner
+            .entries()
+            .filter(|e| !e.is_dir())
+            .map(|e| e.name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn records_modification_times() {
+        let dir = sort_dir("mtime");
+        let scanner = scan(&dir, NO_LIMIT);
+        let modified = |name: &str| {
+            scanner
+                .entries()
+                .find(|e| &*e.name == name)
+                .unwrap()
+                .modified
+        };
+        assert_eq!(modified("b.txt"), 1_000_000_000);
+        assert_eq!(modified("A.txt"), 1_700_000_000);
+        assert!(modified("sub") > 0, "directories have their own time");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sorts_by_size_name_or_modified() {
+        let dir = sort_dir("sort");
+        let mut scanner = scan(&dir, NO_LIMIT);
+        assert_eq!(scanner.sort(), Sort::default());
+        assert_eq!(file_names(&scanner), ["b.txt", "c.txt", "A.txt"]);
+
+        scanner.set_sort(SortBy::Name.into());
+        assert_eq!(entry_names(&scanner), ["A.txt", "b.txt", "c.txt", "sub"]);
+
+        scanner.set_sort(SortBy::Modified.into());
+        assert_eq!(file_names(&scanner), ["A.txt", "c.txt", "b.txt"]);
+
+        scanner.set_sort(SortBy::Size.into());
+        assert_eq!(file_names(&scanner), ["b.txt", "c.txt", "A.txt"]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn each_order_can_be_reversed() {
+        let dir = sort_dir("sort-reverse");
+        let mut scanner = scan(&dir, NO_LIMIT);
+        let reversed = |by| Sort { by, reversed: true };
+
+        scanner.set_sort(reversed(SortBy::Size));
+        assert_eq!(file_names(&scanner), ["A.txt", "c.txt", "b.txt"]);
+        scanner.set_sort(reversed(SortBy::Name));
+        assert_eq!(entry_names(&scanner), ["sub", "c.txt", "b.txt", "A.txt"]);
+        scanner.set_sort(reversed(SortBy::Modified));
+        assert_eq!(file_names(&scanner), ["b.txt", "c.txt", "A.txt"]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sort_directions_are_described_plainly() {
+        let sort = |by, reversed| Sort { by, reversed };
+        let cases = [
+            (sort(SortBy::Size, false), false, "size (largest first)"),
+            (sort(SortBy::Size, true), true, "size (smallest first)"),
+            (sort(SortBy::Name, false), true, "name (A to Z)"),
+            (sort(SortBy::Name, true), false, "name (Z to A)"),
+            (
+                sort(SortBy::Modified, false),
+                false,
+                "modified (newest first)",
+            ),
+            (
+                sort(SortBy::Modified, true),
+                true,
+                "modified (oldest first)",
+            ),
+        ];
+        for (sort, ascending, description) in cases {
+            assert_eq!(sort.ascending(), ascending, "{description}");
+            assert_eq!(sort.describe(), description);
+        }
+    }
+
+    #[test]
+    fn changing_the_sort_keeps_the_highlighted_entry() {
+        let dir = sort_dir("sort-keep");
+        let mut scanner = scan(&dir, NO_LIMIT);
+        select_by_name(&mut scanner, "c.txt");
+
+        scanner.set_sort(SortBy::Name.into());
+        assert_eq!(&*scanner.selected_entry().unwrap().0.name, "c.txt");
+        scanner.set_sort(SortBy::Modified.into());
+        assert_eq!(&*scanner.selected_entry().unwrap().0.name, "c.txt");
+        scanner.set_sort(Sort {
+            by: SortBy::Modified,
+            reversed: true,
+        });
+        assert_eq!(&*scanner.selected_entry().unwrap().0.name, "c.txt");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_sort_applies_in_every_directory_and_survives_going_back() {
+        let dir = sort_dir("sort-nav");
+        let mut scanner = scan(&dir, NO_LIMIT);
+        scanner.set_sort(SortBy::Modified.into());
+        select_by_name(&mut scanner, "sub");
+
+        assert_eq!(scanner.enter_selected(), Enter::Entered);
+        assert_eq!(entry_names(&scanner), ["z.txt", "y.txt"]);
+
+        // Change the sort inside, then come back: the parent uses it too,
+        // and the folder we opened is still the one highlighted.
+        scanner.set_sort(SortBy::Name.into());
+        assert_eq!(entry_names(&scanner), ["y.txt", "z.txt"]);
+        assert!(scanner.go_up());
+        assert_eq!(entry_names(&scanner), ["A.txt", "b.txt", "c.txt", "sub"]);
+        assert_eq!(&*scanner.selected_entry().unwrap().0.name, "sub");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn filter_and_sort_combine() {
+        let dir = sort_dir("sort-filter");
+        let mut scanner = scan(&dir, NO_LIMIT);
+        scanner.set_sort(SortBy::Name.into());
+        scanner.set_filter("txt");
+        assert_eq!(entry_names(&scanner), ["A.txt", "b.txt", "c.txt"]);
+
+        scanner.clear_filter();
+        assert_eq!(entry_names(&scanner), ["A.txt", "b.txt", "c.txt", "sub"]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn forget_removes_a_loaded_entry() {
         let dir = sample_dir("forget");
@@ -1302,7 +1634,8 @@ mod tests {
         let dir_dev = device_id(&dir).unwrap();
         let file_dev = device_id(&dir.join("a.txt")).unwrap();
         assert_eq!(dir_dev, file_dev);
-        assert!(!crosses_filesystem_boundary(&dir, Some(dir_dev)));
+        let metadata = fs::metadata(&dir).unwrap();
+        assert!(!crosses_filesystem_boundary(&metadata, Some(dir_dev)));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1314,7 +1647,8 @@ mod tests {
 
         let real_dev = device_id(&dir).unwrap();
         let fake_dev = real_dev.wrapping_add(1);
-        assert!(crosses_filesystem_boundary(&dir, Some(fake_dev)));
+        let metadata = fs::metadata(&dir).unwrap();
+        assert!(crosses_filesystem_boundary(&metadata, Some(fake_dev)));
 
         fs::remove_dir_all(&dir).ok();
     }

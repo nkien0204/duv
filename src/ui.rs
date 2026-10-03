@@ -13,6 +13,7 @@ use ratatui::{
 
 use crate::app::{App, Choice, DeleteRequest};
 use crate::disks::format_bytes;
+use crate::scanner::SortBy;
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     // Both tables fill the screen: rows minus the border and header.
@@ -175,6 +176,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
             ("/", "filter"),
             ("d", "trash"),
             ("s", "rescan"),
+            ("t", "sort"),
             ("?", "help"),
             ("q", "quit"),
         ]),
@@ -205,13 +207,28 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
             Style::default().add_modifier(Modifier::BOLD)
         };
 
+        // The active sort's column is marked with its direction: ↑ when
+        // values go up down the list (A to Z, smallest or oldest first).
+        let sort = scanner.sort();
+        let arrow = if sort.ascending() { "↑" } else { "↓" };
+        let column = |title: &str, by: SortBy| {
+            if sort.by == by {
+                Cell::from(format!("{title} {arrow}"))
+            } else {
+                Cell::from(title.to_string())
+            }
+        };
         let header = Row::new(vec![
-            Cell::from("Name"),
+            column("Name", SortBy::Name),
             Cell::from("Type"),
-            Cell::from("Size"),
+            column("Size", SortBy::Size),
+            column("Modified", SortBy::Modified),
         ])
         .style(header_style);
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
         let selected = scanner.selected;
         let rows = scanner.entries().enumerate().map(|(i, entry)| {
             let style = if is_scanning {
@@ -228,6 +245,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
                 Cell::from(entry.name.to_string()),
                 Cell::from(if entry.is_dir() { "Dir" } else { "File" }),
                 Cell::from(format_bytes(entry.size)),
+                Cell::from(age(entry.modified, now)),
             ])
             .style(style)
         });
@@ -235,9 +253,10 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(60),
-                Constraint::Percentage(15),
-                Constraint::Percentage(25),
+                Constraint::Percentage(50),
+                Constraint::Percentage(10),
+                Constraint::Percentage(18),
+                Constraint::Percentage(22),
             ],
         )
         .header(header)
@@ -269,6 +288,31 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         frame.render_widget(Clear, area);
         frame.render_widget(gauge, area);
     }
+}
+
+/// How long ago `modified` (seconds since the Unix epoch) was, relative to
+/// `now`, e.g. "3 days ago". Shown as an age rather than a date because
+/// formatting local dates would need a timezone library.
+fn age(modified: u32, now: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const MONTH: u64 = 30 * DAY;
+    const YEAR: u64 = 365 * DAY;
+    if modified == 0 {
+        return "unknown".to_string();
+    }
+    let elapsed = now.saturating_sub(u64::from(modified));
+    let (count, unit) = match elapsed {
+        e if e < MINUTE => return "just now".to_string(),
+        e if e < HOUR => (e / MINUTE, "minute"),
+        e if e < DAY => (e / HOUR, "hour"),
+        e if e < MONTH => (e / DAY, "day"),
+        e if e < YEAR => (e / MONTH, "month"),
+        e => (e / YEAR, "year"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural} ago")
 }
 
 /// A left-aligned bottom border line of `(key, action)` hints, e.g.
@@ -397,9 +441,11 @@ const HELP: &[(&str, &str)] = &[
     ("d  Delete", "move to Trash (asks first)"),
     ("o", "show in file manager"),
     ("y", "copy full path"),
-    ("Filter", ""),
+    ("Filter and sort", ""),
     ("/", "filter this folder by name"),
     ("Enter  Esc", "keep / cancel (Esc clears)"),
+    ("t", "sort by size / name / modified"),
+    ("r", "reverse the sort order"),
     ("General", ""),
     ("?", "this help"),
     ("q  Ctrl+C", "quit (asks first) / at once"),
@@ -538,6 +584,33 @@ mod tests {
             popup_width(|frame| render_delete_confirmation(&delete_request("a.txt"), frame));
         assert_eq!(quit, CONFIRMATION_WIDTH as usize);
         assert_eq!(delete, quit);
+    }
+
+    #[test]
+    fn age_reads_naturally() {
+        let now = 2_000_000_000;
+        assert_eq!(age(0, now), "unknown");
+        assert_eq!(age(1_999_999_990, now), "just now");
+        assert_eq!(age(1_999_999_940, now), "1 minute ago");
+        assert_eq!(age(1_999_999_000, now), "16 minutes ago");
+        assert_eq!(age(1_999_996_400, now), "1 hour ago");
+        assert_eq!(age(1_999_000_000, now), "11 days ago");
+        assert_eq!(age(1_990_000_000, now), "3 months ago");
+        assert_eq!(age(1_900_000_000, now), "3 years ago");
+        // A timestamp in the future (clock skew) isn't negative.
+        assert_eq!(age(2_000_000_100, now), "just now");
+    }
+
+    #[test]
+    fn sort_status_fits_an_80_column_border() {
+        use crate::scanner::{Sort, SortBy};
+        for by in [SortBy::Size, SortBy::Name, SortBy::Modified] {
+            for reversed in [false, true] {
+                let status = crate::app::sort_status(Sort { by, reversed });
+                // 78 columns inside the corners, minus the line's padding.
+                assert!(status.chars().count() + 2 <= 78, "{status}");
+            }
+        }
     }
 
     #[test]
