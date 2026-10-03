@@ -21,6 +21,11 @@ terminal.
 - 🎨 Configurable themes and keybindings
 - 💻 Cross-platform (Linux, macOS, Windows)
 
+`/` filters the current folder by name as you type (case-insensitive, any
+part of the name, so `.mp4` or `cache` both work). `Enter` keeps the
+filter and returns to navigation, `Esc` cancels or clears it, and opening
+or leaving the folder clears it too.
+
 Deleting moves the entry to the system Trash (Recycle Bin on Windows), so
 it can be restored; the space is freed once the Trash is emptied. The
 confirmation popup defaults to **No**.
@@ -79,6 +84,7 @@ overhead).
 | `h` / `Backspace` / `←` / `Esc` | Go back / Cancel           |
 | `s`                             | Start/Rescan               |
 | `d` / `Delete`                  | Move to Trash (asks first) |
+| `/`                             | Filter current folder      |
 | `q`                             | Quit (with confirmation)   |
 | `Ctrl+C`                        | Quit unconditionally       |
 

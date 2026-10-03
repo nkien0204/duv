@@ -85,6 +85,9 @@ pub struct Scanner {
     pub table_state: ratatui::widgets::TableState,
     /// The directory currently shown; starts at [`Tree::ROOT`].
     current: NodeId,
+    /// A name filter narrowing the entries of `current`, if one is set.
+    /// Cleared when moving to another directory.
+    filter: Option<Filter>,
     /// Directories above `current` that were drilled through, with their
     /// selection and scroll state, innermost last.
     parents: Vec<SavedView>,
@@ -101,6 +104,15 @@ pub struct Scanner {
     last_visit: HashMap<NodeId, u64>,
     clock: u64,
     rx: Option<mpsc::Receiver<Msg>>,
+}
+
+/// A name filter on the current directory's entries.
+struct Filter {
+    /// What the user typed.
+    query: String,
+    /// Entries of the current directory whose names contain `query`
+    /// (ignoring case), in display order.
+    matches: Vec<NodeId>,
 }
 
 /// A directory view to restore when going back up.
@@ -180,6 +192,7 @@ impl Scanner {
             selected: 0,
             table_state: ratatui::widgets::TableState::default().with_selected(Some(0)),
             current: Tree::ROOT,
+            filter: None,
             parents: Vec::new(),
             job_dir: Tree::ROOT,
             pending: HashMap::new(),
@@ -246,14 +259,12 @@ impl Scanner {
     /// Entries of the directory currently shown, largest first once the
     /// scan is finished.
     pub fn entries(&self) -> impl Iterator<Item = &Node> {
-        self.current_children()
-            .iter()
-            .filter_map(|&id| self.tree.get(id))
+        self.visible().iter().filter_map(|&id| self.tree.get(id))
     }
 
     /// Number of entries in the directory currently shown.
     pub fn entry_count(&self) -> usize {
-        self.current_children().len()
+        self.visible().len()
     }
 
     /// The highlighted entry and its full path, once the scan is finished.
@@ -261,7 +272,7 @@ impl Scanner {
         if !self.finished {
             return None;
         }
-        let &id = self.current_children().get(self.selected)?;
+        let &id = self.visible().get(self.selected)?;
         Some((self.tree.get(id)?, self.tree.path(id)?))
     }
 
@@ -284,6 +295,7 @@ impl Scanner {
                 self.tree.remove(id, |freed| {
                     last_visit.remove(&freed);
                 });
+                self.refresh_filter();
                 let count = self.entry_count();
                 self.selected = self.selected.min(count.saturating_sub(1));
                 self.table_state.select(Some(self.selected));
@@ -293,8 +305,83 @@ impl Scanner {
         }
     }
 
-    fn current_children(&self) -> &[NodeId] {
+    /// The current directory's entries as shown: all of them, or only the
+    /// filter's matches.
+    fn visible(&self) -> &[NodeId] {
+        match &self.filter {
+            Some(filter) => &filter.matches,
+            None => self.all_children(),
+        }
+    }
+
+    fn all_children(&self) -> &[NodeId] {
         self.tree.children(self.current).unwrap_or(&[])
+    }
+
+    /// The active filter's query, if any.
+    pub fn filter_query(&self) -> Option<&str> {
+        self.filter.as_ref().map(|filter| filter.query.as_str())
+    }
+
+    /// Number of entries in the current directory, ignoring the filter.
+    pub fn unfiltered_count(&self) -> usize {
+        self.all_children().len()
+    }
+
+    /// Shows only the current directory's entries whose names contain
+    /// `query`, ignoring case (an empty query matches everything), and
+    /// highlights the first match. No-op while a scan is running.
+    pub fn set_filter(&mut self, query: &str) {
+        if !self.finished {
+            return;
+        }
+        self.filter = Some(Filter {
+            query: query.to_string(),
+            matches: Vec::new(),
+        });
+        self.refresh_filter();
+        self.select(0);
+    }
+
+    /// Removes the filter, keeping the highlighted entry highlighted.
+    pub fn clear_filter(&mut self) {
+        let index = self.unfiltered_selected();
+        if self.filter.take().is_some() {
+            self.table_state = ratatui::widgets::TableState::default();
+            self.select(index);
+        }
+    }
+
+    /// Recomputes the filter's matches from the current directory.
+    fn refresh_filter(&mut self) {
+        let Some(query) = self.filter.as_ref().map(|f| f.query.to_lowercase()) else {
+            return;
+        };
+        let matches = self
+            .all_children()
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.tree
+                    .get(id)
+                    .is_some_and(|node| node.name.to_lowercase().contains(&query))
+            })
+            .collect();
+        if let Some(filter) = &mut self.filter {
+            filter.matches = matches;
+        }
+    }
+
+    /// Index of the highlighted entry within all of the current
+    /// directory's entries (the filter's matches are a subset of them).
+    fn unfiltered_selected(&self) -> usize {
+        let Some(&id) = self.visible().get(self.selected) else {
+            return 0;
+        };
+        self.all_children()
+            .iter()
+            .position(|&child| child == id)
+            .unwrap_or(0)
     }
 
     /// Highlights entry `index` of the current directory, clamped to the
@@ -332,7 +419,7 @@ impl Scanner {
         if !self.finished {
             return Enter::Ignored;
         }
-        let Some(&id) = self.current_children().get(self.selected) else {
+        let Some(&id) = self.visible().get(self.selected) else {
             return Enter::Ignored;
         };
         let (Some(node), Some(path)) = (self.tree.get(id), self.tree.path(id)) else {
@@ -370,6 +457,7 @@ impl Scanner {
         let Some(view) = self.parents.pop() else {
             return false;
         };
+        self.filter = None;
         self.current = view.dir;
         self.selected = view.selected;
         self.table_state = view.table_state;
@@ -378,6 +466,9 @@ impl Scanner {
     }
 
     fn push_view(&mut self, dir: NodeId) {
+        // The saved position must refer to the unfiltered list, which is
+        // what's shown when coming back.
+        self.clear_filter();
         let table_state = std::mem::replace(
             &mut self.table_state,
             ratatui::widgets::TableState::default().with_selected(Some(0)),
@@ -948,6 +1039,105 @@ mod tests {
         .collect();
         assert_eq!(linked.iter().filter(|&&size| size > 0).count(), 1);
         assert_eq!(tree.node_count(), 1 + 2 + 3 + 1); // root, a, b, 3 links, other
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// root/
+    /// ├── alpha.txt   (largest)
+    /// ├── beta.log
+    /// ├── Gamma.TXT
+    /// └── docs/
+    ///     └── delta.md
+    fn filter_dir(name: &str) -> PathBuf {
+        let dir = test_dir(name);
+        write_file(&dir.join("alpha.txt"), &[0u8; 40_000]);
+        write_file(&dir.join("beta.log"), &[0u8; 20_000]);
+        write_file(&dir.join("Gamma.TXT"), &[0u8; 10_000]);
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        write_file(&dir.join("docs").join("delta.md"), &[0u8; 30_000]);
+        dir
+    }
+
+    #[test]
+    fn filter_matches_names_ignoring_case() {
+        let dir = filter_dir("filter");
+        let mut scanner = scan(&dir, NO_LIMIT);
+        assert_eq!(scanner.filter_query(), None);
+
+        scanner.set_filter("txt");
+        assert_eq!(scanner.filter_query(), Some("txt"));
+        assert_eq!(entry_names(&scanner), ["alpha.txt", "Gamma.TXT"]);
+        assert_eq!(scanner.entry_count(), 2);
+        assert_eq!(scanner.unfiltered_count(), 4);
+
+        scanner.set_filter("");
+        assert_eq!(
+            scanner.entry_count(),
+            4,
+            "an empty query matches everything"
+        );
+
+        scanner.set_filter("nothing-like-this");
+        assert_eq!(scanner.entry_count(), 0);
+        assert!(scanner.selected_entry().is_none());
+        assert_eq!(scanner.enter_selected(), Enter::Ignored);
+
+        scanner.clear_filter();
+        assert_eq!(scanner.filter_query(), None);
+        assert_eq!(scanner.entry_count(), 4);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clearing_the_filter_keeps_the_highlighted_entry() {
+        let dir = filter_dir("filter-clear");
+        let mut scanner = scan(&dir, NO_LIMIT);
+
+        scanner.set_filter("a");
+        select_by_name(&mut scanner, "Gamma.TXT");
+        scanner.clear_filter();
+        let (node, _) = scanner.selected_entry().unwrap();
+        assert_eq!(&*node.name, "Gamma.TXT");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opening_from_a_filtered_list_comes_back_unfiltered_on_the_same_entry() {
+        let dir = filter_dir("filter-enter");
+        let mut scanner = scan(&dir, NO_LIMIT);
+
+        scanner.set_filter("doc");
+        assert_eq!(entry_names(&scanner), ["docs"]);
+        assert_eq!(scanner.enter_selected(), Enter::Entered);
+        assert_eq!(scanner.filter_query(), None, "the filter stays behind");
+        assert_eq!(entry_names(&scanner), ["delta.md"]);
+
+        assert!(scanner.go_up());
+        assert_eq!(scanner.filter_query(), None);
+        assert_eq!(scanner.entry_count(), 4);
+        let (node, _) = scanner.selected_entry().unwrap();
+        assert_eq!(&*node.name, "docs");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn forgetting_a_filtered_entry_updates_the_matches() {
+        let dir = filter_dir("filter-forget");
+        let mut scanner = scan(&dir, NO_LIMIT);
+
+        scanner.set_filter("txt");
+        let (node, path) = scanner.selected_entry().unwrap();
+        assert_eq!(&*node.name, "alpha.txt");
+        let size = node.size;
+        scanner.forget(&path, size);
+
+        assert_eq!(entry_names(&scanner), ["Gamma.TXT"]);
+        assert_eq!(scanner.unfiltered_count(), 3);
+        assert_eq!(scanner.selected, 0);
 
         fs::remove_dir_all(&dir).ok();
     }

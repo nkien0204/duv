@@ -76,6 +76,9 @@ pub struct App {
     /// Number of list rows visible on screen, as of the last render. Sets
     /// how far page jumps move.
     pub page_size: usize,
+    /// Whether the user is typing a name filter (after `/`); keys then edit
+    /// the query instead of navigating.
+    pub filter_input: bool,
     /// Whether the previous key was a lone `g`, so a second `g` jumps to
     /// the first row (vim's `gg`).
     pub pending_g: bool,
@@ -100,6 +103,7 @@ impl Default for App {
             scanner: None,
             scanner_history: Vec::new(),
             page_size: 10,
+            filter_input: false,
             pending_g: false,
             memory_budget: scanner::DEFAULT_MEMORY_BUDGET,
             scanner_error: None,
@@ -188,6 +192,67 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Starts typing a name filter for the current directory of a finished
+    /// scan, keeping any existing query to edit. No-op otherwise.
+    pub fn start_filter(&mut self) {
+        let Some(scanner) = self.scanner.as_mut().filter(|s| s.finished) else {
+            return;
+        };
+        if scanner.filter_query().is_none() {
+            scanner.set_filter("");
+        }
+        self.filter_input = true;
+    }
+
+    /// Appends `c` to the filter being typed.
+    pub fn filter_push(&mut self, c: char) {
+        self.edit_filter(|query| query.push(c));
+    }
+
+    /// Deletes the last character of the filter being typed, or cancels the
+    /// filter if it's already empty.
+    pub fn filter_pop(&mut self) {
+        let empty = self
+            .scanner
+            .as_ref()
+            .and_then(Scanner::filter_query)
+            .is_none_or(str::is_empty);
+        if empty {
+            self.cancel_filter();
+        } else {
+            self.edit_filter(|query| {
+                query.pop();
+            });
+        }
+    }
+
+    /// Stops typing and keeps the filter (an empty one is dropped).
+    pub fn accept_filter(&mut self) {
+        self.filter_input = false;
+        if let Some(scanner) = &mut self.scanner
+            && scanner.filter_query() == Some("")
+        {
+            scanner.clear_filter();
+        }
+    }
+
+    /// Stops typing and removes the filter.
+    pub fn cancel_filter(&mut self) {
+        self.filter_input = false;
+        if let Some(scanner) = &mut self.scanner {
+            scanner.clear_filter();
+        }
+    }
+
+    fn edit_filter(&mut self, edit: impl FnOnce(&mut String)) {
+        let Some(scanner) = &mut self.scanner else {
+            return;
+        };
+        let mut query = scanner.filter_query().unwrap_or_default().to_string();
+        edit(&mut query);
+        scanner.set_filter(&query);
     }
 
     /// Returns the currently selected disk, if any.

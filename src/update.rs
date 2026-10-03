@@ -29,6 +29,35 @@ pub fn update(app: &mut App, key_event: KeyEvent) {
         return;
     }
 
+    if app.filter_input {
+        match key_event.code {
+            KeyCode::Char('c') | KeyCode::Char('C')
+                if key_event.modifiers == KeyModifiers::CONTROL =>
+            {
+                app.quit()
+            }
+            KeyCode::Esc => app.cancel_filter(),
+            KeyCode::Enter => app.accept_filter(),
+            KeyCode::Backspace => app.filter_pop(),
+            // Arrows still move through the matches while typing.
+            KeyCode::Down => {
+                if let Some(scanner) = &mut app.scanner {
+                    scanner.select_next();
+                }
+            }
+            KeyCode::Up => {
+                if let Some(scanner) = &mut app.scanner {
+                    scanner.select_previous();
+                }
+            }
+            KeyCode::Char(c) if !key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.filter_push(c)
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if let Some(selected) = app.quit_confirmation {
         match key_event.code {
             KeyCode::Left | KeyCode::Char('h') => {
@@ -72,8 +101,15 @@ pub fn update(app: &mut App, key_event: KeyEvent) {
         KeyCode::Char('q') => {
             app.quit_confirmation = Some(Choice::No);
         }
+        KeyCode::Char('/') => app.start_filter(),
         KeyCode::Esc => {
-            if app.scanner.is_some() || app.scanner_error.is_some() {
+            let filtered = app
+                .scanner
+                .as_ref()
+                .is_some_and(|scanner| scanner.filter_query().is_some());
+            if filtered {
+                app.cancel_filter();
+            } else if app.scanner.is_some() || app.scanner_error.is_some() {
                 app.go_back();
             } else {
                 app.quit_confirmation = Some(Choice::No);
@@ -234,6 +270,152 @@ mod tests {
 
         press(&mut app, KeyCode::End);
         assert_eq!(scan_selected(&app), 0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    fn visible_names(app: &App) -> Vec<String> {
+        app.scanner
+            .as_ref()
+            .unwrap()
+            .entries()
+            .map(|e| e.name.to_string())
+            .collect()
+    }
+
+    fn filter_query(app: &App) -> Option<String> {
+        app.scanner
+            .as_ref()
+            .unwrap()
+            .filter_query()
+            .map(str::to_string)
+    }
+
+    /// An app showing the finished scan of a folder with four files.
+    fn filter_app(name: &str) -> (App, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("duv-update-{name}-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("alpha.txt"), [0u8; 40_000]).unwrap();
+        fs::write(dir.join("beta.log"), [0u8; 30_000]).unwrap();
+        fs::write(dir.join("gamma.TXT"), [0u8; 20_000]).unwrap();
+        fs::write(dir.join("quick-delete.md"), [0u8; 10_000]).unwrap();
+        let mut app = App::with_start_path(dir.clone(), DEFAULT_MEMORY_BUDGET);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.scanner.as_ref().unwrap().finished && Instant::now() < deadline {
+            app.tick();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.scanner.as_ref().unwrap().finished);
+        (app, dir)
+    }
+
+    #[test]
+    fn typing_a_filter_narrows_the_list_as_you_type() {
+        let (mut app, dir) = filter_app("filter-type");
+
+        press(&mut app, KeyCode::Char('/'));
+        assert!(app.filter_input);
+        assert_eq!(visible_names(&app).len(), 4);
+
+        type_text(&mut app, "txt");
+        assert_eq!(visible_names(&app), ["alpha.txt", "gamma.TXT"]);
+
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(filter_query(&app).as_deref(), Some("tx"));
+
+        // Enter keeps the filter and returns to navigation.
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.filter_input);
+        assert_eq!(visible_names(&app), ["alpha.txt", "gamma.TXT"]);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.scanner.as_ref().unwrap().selected, 1);
+
+        // `/` edits the same query again.
+        press(&mut app, KeyCode::Char('/'));
+        assert_eq!(filter_query(&app).as_deref(), Some("tx"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn keys_are_text_while_typing_a_filter() {
+        let (mut app, dir) = filter_app("filter-text");
+
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "quick-d");
+        assert!(
+            !app.should_quit && app.quit_confirmation.is_none(),
+            "q is text"
+        );
+        assert!(app.delete_confirmation.is_none(), "d is text");
+        assert_eq!(visible_names(&app), ["quick-delete.md"]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn esc_cancels_then_clears_then_goes_back() {
+        let (mut app, dir) = filter_app("filter-esc");
+
+        // Esc while typing cancels the filter.
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "log");
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.filter_input);
+        assert_eq!(filter_query(&app), None);
+
+        // With a kept filter, Esc clears it first...
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "log");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(filter_query(&app), None);
+        assert!(app.scanner.is_some());
+
+        // ...and the next Esc goes back as usual (here: to the disk list).
+        press(&mut app, KeyCode::Esc);
+        assert!(app.scanner.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backspace_on_an_empty_filter_cancels_it() {
+        let (mut app, dir) = filter_app("filter-backspace");
+
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Backspace);
+        assert!(app.filter_input, "still typing an empty query");
+        press(&mut app, KeyCode::Backspace);
+        assert!(!app.filter_input);
+        assert_eq!(filter_query(&app), None);
+
+        // Enter on an empty query drops it too.
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(filter_query(&app), None);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn filter_is_ignored_while_scanning() {
+        let dir =
+            std::env::temp_dir().join(format!("duv-update-filter-busy-{}", std::process::id()));
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let mut app = App::with_start_path(dir.clone(), DEFAULT_MEMORY_BUDGET);
+        assert!(!app.scanner.as_ref().unwrap().finished);
+
+        press(&mut app, KeyCode::Char('/'));
+        assert!(!app.filter_input);
 
         fs::remove_dir_all(&dir).ok();
     }
