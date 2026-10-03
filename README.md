@@ -27,7 +27,9 @@ filter and returns to navigation, `Esc` cancels or clears it, and opening
 or leaving the folder clears it too.
 
 `o` opens the file manager with the entry selected (Finder, Explorer; on
-Linux, its folder via `xdg-open`). `y` copies the entry's full path using
+Linux, its folder via `xdg-open`). Where there's no desktop to show it on —
+over SSH, or on a server without a graphical display — it says so and
+suggests `y` instead. `y` copies the entry's full path using
 the system clipboard tool (`pbcopy`, PowerShell, or `wl-copy`/`xclip`/`xsel`
 on Linux). Over SSH, it asks your terminal to copy instead (OSC 52), so the
 path lands on *your* machine's clipboard; most modern terminals support

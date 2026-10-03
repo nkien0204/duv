@@ -120,7 +120,12 @@ in duv:
 - `reveal(path)` — `open -R` (macOS, selects the item in Finder),
   `explorer /select,` (Windows), or `xdg-open` on the containing folder
   (Linux and others, which have no standard way to select an item). It
-  only launches the file manager and reaps it on a background thread.
+  only launches the file manager and reaps it on a background thread, so
+  success means "launched" (hence the "Opening …" status). When there's no
+  desktop to show it on — an SSH session (it would open on the remote
+  screen), or Linux/BSD with neither `DISPLAY` nor `WAYLAND_DISPLAY`, e.g. a
+  server — it doesn't try, and returns an explanation suggesting `y`, which
+  `App` shows in the notice popup.
 - `copy_to_clipboard(text)` — the platform's clipboard tool: `pbcopy`,
   PowerShell `Set-Clipboard` (text passed via an environment variable;
   `clip.exe` mangles non-ASCII), or `wl-copy`/`xclip`/`xsel` in that

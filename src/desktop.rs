@@ -32,7 +32,16 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
 /// Finder (macOS) or Explorer (Windows); on other systems, which have no
 /// standard way to select an item, its containing folder is opened with
 /// `xdg-open`. Returns once the file manager has been launched.
+///
+/// Fails with an explanation, without trying, when there's no desktop to
+/// show it on: over SSH, or on a Linux/BSD machine with no graphical
+/// display (e.g. a server).
 pub fn reveal(path: &Path) -> Result<(), String> {
+    if let Some(reason) = missing_desktop(over_ssh(), has_display()) {
+        return Err(format!(
+            "there's no desktop here ({reason}). Press y to copy the path instead."
+        ));
+    }
     let mut command;
     if cfg!(target_os = "macos") {
         command = Command::new("open");
@@ -142,6 +151,27 @@ fn pipe_to(command: &mut Command, text: &str) -> io::Result<()> {
     }
 }
 
+/// Why a file manager can't be shown, if it can't: over SSH it would open
+/// on the remote machine's screen, and without a display there's nowhere
+/// to open it at all.
+fn missing_desktop(over_ssh: bool, has_display: bool) -> Option<&'static str> {
+    if over_ssh {
+        Some("this is an SSH session")
+    } else if !has_display {
+        Some("no graphical display was found")
+    } else {
+        None
+    }
+}
+
+/// Whether a graphical display is available. macOS and Windows always have
+/// one for a local user; elsewhere it's an X11 or Wayland session.
+fn has_display() -> bool {
+    cfg!(any(target_os = "macos", windows))
+        || std::env::var_os("DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
 /// Whether duv is running in an SSH session, where the local clipboard
 /// tools would copy on the remote machine.
 fn over_ssh() -> bool {
@@ -199,6 +229,20 @@ mod tests {
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
         assert_eq!(base64("/tmp/é".as_bytes()), "L3RtcC/DqQ==");
         assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
+    }
+
+    #[test]
+    fn reveal_needs_a_local_desktop() {
+        assert_eq!(missing_desktop(false, true), None);
+        assert_eq!(
+            missing_desktop(true, true),
+            Some("this is an SSH session"),
+            "a display on the remote machine doesn't help"
+        );
+        assert_eq!(
+            missing_desktop(false, false),
+            Some("no graphical display was found")
+        );
     }
 
     #[test]

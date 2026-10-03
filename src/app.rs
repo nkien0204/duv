@@ -288,7 +288,8 @@ impl App {
             return;
         };
         match (self.reveal)(&path) {
-            Ok(()) => self.status = Some(format!("Opened {} in the file manager", path.display())),
+            // Only the launch is known to have worked, hence "Opening".
+            Ok(()) => self.status = Some(format!("Opening {} in the file manager", path.display())),
             Err(err) => {
                 self.notice = Some(format!(
                     "Couldn't show {} in the file manager: {err}",
@@ -706,6 +707,28 @@ mod tests {
         );
         assert!(app.status.as_ref().unwrap().contains("file manager"));
         assert!(app.notice.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn no_desktop(_: &Path) -> Result<(), String> {
+        Err(
+            "there's no desktop here (this is an SSH session). Press y to copy the path instead."
+                .to_string(),
+        )
+    }
+
+    #[test]
+    fn reveal_without_a_desktop_explains_why() {
+        let (mut app, dir) = delete_test_app("reveal-headless");
+        app.reveal = no_desktop;
+        app.reveal_selected();
+
+        assert!(app.status.is_none());
+        let notice = app.notice.as_ref().unwrap();
+        assert!(notice.contains(&dir.join("big.bin").display().to_string()));
+        assert!(notice.contains("no desktop here"));
+        assert!(notice.contains("Press y"));
 
         fs::remove_dir_all(&dir).ok();
     }
