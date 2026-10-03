@@ -92,11 +92,16 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
   **and every scanner in `scanner_history`**, so totals stay right when
   backing out. A failure sets `notice` instead.
 - `notice: Option<String>` — a message shown in a popup until the next
-  key press (currently: failed deletes).
-- `trash: TrashFn` — the function that moves a path to the Trash;
-  `move_to_trash` (the `trash` crate, using `NSFileManager` on macOS so it
-  never triggers a Finder automation prompt) by default, swapped for a
-  plain delete inside a temp directory in tests.
+  key press (failed deletes, reveals and copies).
+- `status: Option<String>` — a short confirmation (e.g. "Copied /path")
+  shown on the bottom border until the next key press.
+- `trash: TrashFn`, `reveal: RevealFn`, `copy: CopyFn` — the hand-offs to
+  the desktop, defaulting to `desktop::move_to_trash`, `desktop::reveal`
+  and `desktop::copy_to_clipboard`. Tests swap in fakes so they never
+  touch the real Trash, file manager or clipboard.
+  `reveal_selected()` and `copy_selected_path()` act on the highlighted
+  row: an entry of a finished scan, or a disk's mount point on the disk
+  list.
 - `scanner_error: Option<String>` — set if the most recent scan attempt
   failed to even list its root directory (e.g. a permissions error).
 
@@ -104,6 +109,29 @@ Deliberately has **no dependency on ratatui's rendering types** (`Buffer`,
 `Rect`, `Widget`) or crossterm's event types — it doesn't know how it's
 drawn or how input arrives. It also avoids depending on `sysinfo`'s types
 directly, going through `disks::DiskInfo` instead (see below).
+
+### `desktop.rs` — hand-offs to the desktop
+
+Everything that hands work to the operating system rather than doing it
+in duv:
+
+- `move_to_trash(path)` — the `trash` crate, using `NSFileManager` on
+  macOS so it never triggers a Finder automation prompt.
+- `reveal(path)` — `open -R` (macOS, selects the item in Finder),
+  `explorer /select,` (Windows), or `xdg-open` on the containing folder
+  (Linux and others, which have no standard way to select an item). It
+  only launches the file manager and reaps it on a background thread.
+- `copy_to_clipboard(text)` — the platform's clipboard tool: `pbcopy`,
+  PowerShell `Set-Clipboard` (text passed via an environment variable;
+  `clip.exe` mangles non-ASCII), or `wl-copy`/`xclip`/`xsel` in that
+  order. Over SSH (`SSH_CONNECTION`/`SSH_TTY` set) those would copy on the
+  remote machine, so it writes an OSC 52 escape sequence to the terminal
+  instead, which also serves as the fallback on Linux when no tool is
+  installed. Terminals that don't support OSC 52 (e.g. macOS
+  Terminal.app) silently ignore it. The small base64 encoder it needs is
+  hand-written rather than a dependency.
+
+No new crates: it only uses `std::process::Command` and `trash`.
 
 ### `disks.rs` — disk/volume enumeration
 
@@ -302,7 +330,10 @@ both interaction styles are supported simultaneously. Currently handles:
   deletes a character (or cancels on an empty query), `Up`/`Down` move
   through the matches, `Enter` keeps the filter and `Esc` cancels it.
   With a kept filter, `Esc` clears it before acting as "back".
-- Any key dismisses a `notice` popup.
+- `o` — show the highlighted row in the file manager
+  (`App::reveal_selected`); `y` — copy its full path
+  (`App::copy_selected_path`). Both work on the disk list too.
+- Any key dismisses a `notice` popup, and clears any `status` message.
 
 Future keybindings belong here too.
 
@@ -336,6 +367,8 @@ rendering types. Dispatches on `App` state to one of three views:
   "DUV — disk usage visualizer", "DUV — error"), and its bottom border
   lists the keys that work there (`key_hints`, e.g. "l open · h back ·
   / filter · ...").
+- A `status` message replaces the bottom border's contents until the next
+  key (`status_line`, in green).
 - With a filter set, the scan view's bottom border shows it instead of the
   key hints (`filter_line`): the query being typed with a cursor, or the kept query,
   plus "N of M" matches and the relevant keys. An empty filtered list says
@@ -393,7 +426,7 @@ tui.exit()?;
 - **`clap`** (`derive` plus minimal features, no colour/suggestions) —
   argument parsing in `cli.rs`.
 - **`trash`** — moving entries to the system Trash/Recycle Bin in
-  `app.rs`, across macOS, Linux (freedesktop spec) and Windows. Platform
+  `desktop.rs`, across macOS, Linux (freedesktop spec) and Windows. Platform
   trash APIs differ a lot, so a maintained crate is worth it; on macOS it
   adds a few small `objc2` crates.
 - **`libc`** (Unix only) — `getrusage` for peak memory in `stats.rs`.

@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::desktop;
 use crate::disks::{self, DiskInfo};
 use crate::scanner::{self, Enter, Scanner};
 
@@ -42,6 +43,12 @@ pub enum Jump {
 /// Moves a file or directory to the Trash (or the platform equivalent).
 pub type TrashFn = fn(&Path) -> Result<(), String>;
 
+/// Shows a path in the platform's file manager.
+pub type RevealFn = fn(&Path) -> Result<(), String>;
+
+/// Copies text to the clipboard.
+pub type CopyFn = fn(&str) -> Result<(), String>;
+
 pub struct App {
     pub should_quit: bool,
     /// Whether to show the quit confirmation popup, and which option is selected.
@@ -51,9 +58,14 @@ pub struct App {
     /// A message to show in a popup until the next key press (e.g. a
     /// failed delete).
     pub notice: Option<String>,
-    /// How entries are moved to the Trash. Swappable so tests never touch
-    /// the real Trash.
+    /// A short confirmation shown in place of the key hints until the next
+    /// key press (e.g. after copying a path).
+    pub status: Option<String>,
+    /// How entries are moved to the Trash, shown in the file manager, and
+    /// copied. Swappable so tests never touch the real desktop.
     pub trash: TrashFn,
+    pub reveal: RevealFn,
+    pub copy: CopyFn,
     /// Every mounted disk/volume visible to the OS, as of the last refresh.
     pub disks: Vec<DiskInfo>,
     /// Index into `disks` of the currently highlighted entry.
@@ -96,7 +108,10 @@ impl Default for App {
             quit_confirmation: None,
             delete_confirmation: None,
             notice: None,
-            trash: move_to_trash,
+            status: None,
+            trash: desktop::move_to_trash,
+            reveal: desktop::reveal,
+            copy: desktop::copy_to_clipboard,
             disks: disks::list(),
             selected: 0,
             disks_table_state: ratatui::widgets::TableState::default().with_selected(Some(0)),
@@ -255,6 +270,46 @@ impl App {
         scanner.set_filter(&query);
     }
 
+    /// The path of the highlighted row: an entry of a finished scan, or a
+    /// disk's mount point on the disk list. `None` while scanning or with
+    /// nothing selected.
+    fn selected_path(&self) -> Option<PathBuf> {
+        match &self.scanner {
+            Some(scanner) => scanner.selected_entry().map(|(_, path)| path),
+            None => self
+                .selected_disk()
+                .map(|disk| PathBuf::from(&disk.mount_point)),
+        }
+    }
+
+    /// Shows the highlighted row in the file manager.
+    pub fn reveal_selected(&mut self) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        match (self.reveal)(&path) {
+            Ok(()) => self.status = Some(format!("Opened {} in the file manager", path.display())),
+            Err(err) => {
+                self.notice = Some(format!(
+                    "Couldn't show {} in the file manager: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    /// Copies the highlighted row's full path to the clipboard.
+    pub fn copy_selected_path(&mut self) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        let text = path.to_string_lossy();
+        match (self.copy)(&text) {
+            Ok(()) => self.status = Some(format!("Copied {text}")),
+            Err(err) => self.notice = Some(format!("Couldn't copy the path: {err}")),
+        }
+    }
+
     /// Returns the currently selected disk, if any.
     pub fn selected_disk(&self) -> Option<&DiskInfo> {
         self.disks.get(self.selected)
@@ -377,21 +432,6 @@ impl App {
             }
         }
     }
-}
-
-/// Moves `path` to the system Trash. On macOS this uses `NSFileManager`
-/// rather than asking Finder, so it never triggers an automation
-/// permission prompt (at the cost of Finder's "Put Back" option on some
-/// systems; items can still be dragged out of the Trash).
-fn move_to_trash(path: &Path) -> Result<(), String> {
-    #[allow(unused_mut)]
-    let mut context = trash::TrashContext::default();
-    #[cfg(target_os = "macos")]
-    {
-        use trash::macos::{DeleteMethod, TrashContextExtMacos};
-        context.set_delete_method(DeleteMethod::NsFileManager);
-    }
-    context.delete(path).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -616,6 +656,108 @@ mod tests {
         assert_eq!(root_size(&app), 0);
         let sub = app.scanner.as_ref().unwrap().entries().next().unwrap();
         assert_eq!(sub.size, 0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    thread_local! {
+        /// What the fake reveal/copy functions were called with, per test
+        /// thread (each test runs on its own thread).
+        static CALLS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn calls() -> Vec<String> {
+        CALLS.with(|calls| calls.borrow().clone())
+    }
+
+    fn fake_reveal(path: &Path) -> Result<(), String> {
+        CALLS.with(|calls| {
+            calls
+                .borrow_mut()
+                .push(format!("reveal {}", path.display()))
+        });
+        Ok(())
+    }
+
+    fn fake_copy(text: &str) -> Result<(), String> {
+        CALLS.with(|calls| calls.borrow_mut().push(format!("copy {text}")));
+        Ok(())
+    }
+
+    fn failing_desktop(_: &str) -> Result<(), String> {
+        Err("no clipboard tool".to_string())
+    }
+
+    #[test]
+    fn copy_and_reveal_act_on_the_highlighted_entry() {
+        let (mut app, dir) = delete_test_app("copy-reveal");
+        app.reveal = fake_reveal;
+        app.copy = fake_copy;
+
+        app.copy_selected_path();
+        app.reveal_selected();
+        let big = dir.join("big.bin");
+        assert_eq!(
+            calls(),
+            [
+                format!("copy {}", big.display()),
+                format!("reveal {}", big.display())
+            ]
+        );
+        assert!(app.status.as_ref().unwrap().contains("file manager"));
+        assert!(app.notice.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copy_reports_success_and_failure() {
+        let (mut app, dir) = delete_test_app("copy-status");
+        app.copy = fake_copy;
+        app.copy_selected_path();
+        assert_eq!(
+            app.status.as_deref(),
+            Some(format!("Copied {}", dir.join("big.bin").display()).as_str())
+        );
+
+        app.status = None;
+        app.copy = failing_desktop;
+        app.copy_selected_path();
+        assert!(app.status.is_none());
+        assert!(app.notice.as_ref().unwrap().contains("no clipboard tool"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copy_on_the_disk_list_uses_the_mount_point() {
+        let mut app = App::new(scanner::DEFAULT_MEMORY_BUDGET);
+        app.copy = fake_copy;
+        app.disks = vec![DiskInfo {
+            name: "Data".to_string(),
+            mount_point: "/mnt/data".to_string(),
+            file_system: "ext4".to_string(),
+            total_space: 100,
+            available_space: 50,
+            is_removable: false,
+            kind: disks::DiskKind::Ssd,
+        }];
+        app.copy_selected_path();
+        assert_eq!(calls(), ["copy /mnt/data"]);
+    }
+
+    #[test]
+    fn copy_and_reveal_are_ignored_while_scanning() {
+        let dir = std::env::temp_dir().join(format!("duv-app-copy-busy-{}", std::process::id()));
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let mut app = App::with_start_path(dir.clone(), scanner::DEFAULT_MEMORY_BUDGET);
+        app.reveal = fake_reveal;
+        app.copy = fake_copy;
+        assert!(!app.scanner.as_ref().unwrap().finished);
+
+        app.copy_selected_path();
+        app.reveal_selected();
+        assert!(calls().is_empty());
 
         fs::remove_dir_all(&dir).ok();
     }

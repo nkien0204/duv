@@ -4,6 +4,9 @@ pub mod app;
 /// Command-line argument parsing.
 pub mod cli;
 
+/// Hand-offs to the desktop: Trash, file manager, clipboard.
+pub mod desktop;
+
 /// Disk/volume enumeration.
 pub mod disks;
 
