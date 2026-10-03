@@ -123,6 +123,17 @@ cargo clippy
 If any of these fail because of pre-existing issues unrelated to your
 change, note it rather than silently ignoring it.
 
+CI (`.github/workflows/ci.yml`) runs the same checks on every push to
+`main` and every pull request, on Linux, macOS and Windows, with
+`cargo clippy --all-targets -- -D warnings` (so any warning fails the
+build). Platform-specific code (`#[cfg(unix)]`, `#[cfg(target_os =
+"macos")]`) must therefore compile without warnings everywhere: gate
+helpers, fields and imports that only one platform uses, and gate tests
+that depend on platform behaviour. To check other platforms locally, add
+the target (`rustup target add x86_64-pc-windows-msvc` or
+`x86_64-unknown-linux-gnu`) and run
+`cargo clippy --target <target> --all-targets -- -D warnings`.
+
 For changes to scanning or the tree model, also compare
 `cargo build --release && ./target/release/duv --stats <path>` before and
 after on a large directory (e.g. your home directory) to catch time or
