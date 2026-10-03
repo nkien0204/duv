@@ -96,6 +96,7 @@ overhead).
 | `/`                             | Filter current folder      |
 | `o`                             | Show in file manager       |
 | `y`                             | Copy full path             |
+| `?`                             | Show all keys              |
 | `q`                             | Quit (with confirmation)   |
 | `Ctrl+C`                        | Quit unconditionally       |
 

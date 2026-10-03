@@ -93,6 +93,7 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
   backing out. A failure sets `notice` instead.
 - `notice: Option<String>` — a message shown in a popup until the next
   key press (failed deletes, reveals and copies).
+- `show_help: bool` — whether the key help popup (`?`) is open.
 - `status: Option<String>` — a short confirmation (e.g. "Copied /path")
   shown on the bottom border until the next key press.
 - `trash: TrashFn`, `reveal: RevealFn`, `copy: CopyFn` — the hand-offs to
@@ -338,6 +339,8 @@ both interaction styles are supported simultaneously. Currently handles:
 - `o` — show the highlighted row in the file manager
   (`App::reveal_selected`); `y` — copy its full path
   (`App::copy_selected_path`). Both work on the disk list too.
+- `?` — open the key help popup (`App::show_help`); while it's open, any
+  key closes it and does nothing else. While typing a filter, `?` is text.
 - Any key dismisses a `notice` popup, and clears any `status` message.
 
 Future keybindings belong here too.
@@ -374,6 +377,10 @@ rendering types. Dispatches on `App` state to one of three views:
   / filter · ...").
 - A `status` message replaces the bottom border's contents until the next
   key (`status_line`, in green).
+- `app.show_help` set — a centered popup listing every key from the `HELP`
+  table, grouped by section, sized to fit an 80×24 terminal (a test
+  guards this). The bottom-border hints only show the most-used keys and
+  `? help`.
 - With a filter set, the scan view's bottom border shows it instead of the
   key hints (`filter_line`): the query being typed with a cursor, or the kept query,
   plus "N of M" matches and the relevant keys. An empty filtered list says

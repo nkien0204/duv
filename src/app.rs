@@ -58,6 +58,8 @@ pub struct App {
     /// A message to show in a popup until the next key press (e.g. a
     /// failed delete).
     pub notice: Option<String>,
+    /// Whether the key help popup (`?`) is open.
+    pub show_help: bool,
     /// A short confirmation shown in place of the key hints until the next
     /// key press (e.g. after copying a path).
     pub status: Option<String>,
@@ -108,6 +110,7 @@ impl Default for App {
             quit_confirmation: None,
             delete_confirmation: None,
             notice: None,
+            show_help: false,
             status: None,
             trash: desktop::move_to_trash,
             reveal: desktop::reveal,
