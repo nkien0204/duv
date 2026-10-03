@@ -32,6 +32,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     if app.quit_confirmation.is_some() {
         render_quit_confirmation(app, frame);
     }
+    if app.show_help {
+        render_help(frame);
+    }
     if let Some(notice) = &app.notice {
         render_notice(notice, frame);
     }
@@ -40,7 +43,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 fn render_error(error: &str, frame: &mut Frame) {
     let block = Block::default()
         .title(" DUV — error ")
-        .title_bottom(key_hints(&[("h", "back"), ("q", "quit")]))
+        .title_bottom(key_hints(&[("h", "back"), ("?", "help"), ("q", "quit")]))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
@@ -63,6 +66,7 @@ fn render_disks(app: &mut App, frame: &mut Frame) {
                 ("s", "scan"),
                 ("o", "reveal"),
                 ("y", "copy"),
+                ("?", "help"),
                 ("q", "quit"),
             ]),
         })
@@ -170,9 +174,8 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
             ("h", "back"),
             ("/", "filter"),
             ("d", "trash"),
-            ("o", "reveal"),
-            ("y", "copy"),
             ("s", "rescan"),
+            ("?", "help"),
             ("q", "quit"),
         ]),
     });
@@ -378,6 +381,72 @@ fn render_confirmation(frame: &mut Frame, title: &str, mut message: Vec<Line>, c
     );
 }
 
+/// Every key binding, grouped, as `(keys, action)` rows. Section headings
+/// have no action. Kept short enough for a 24-row terminal.
+const HELP: &[(&str, &str)] = &[
+    ("Moving", ""),
+    ("j k  ↓ ↑", "move down / up"),
+    ("gg Home  G End", "first / last row"),
+    ("PgDn PgUp", "page down / up"),
+    ("Ctrl+d Ctrl+u", "half page down / up"),
+    ("Folders", ""),
+    ("l  Enter  →", "open folder"),
+    ("h  Backspace  ←  Esc", "go back"),
+    ("s", "scan disk / rescan folder"),
+    ("Actions", ""),
+    ("d  Delete", "move to Trash (asks first)"),
+    ("o", "show in file manager"),
+    ("y", "copy full path"),
+    ("Filter", ""),
+    ("/", "filter this folder by name"),
+    ("Enter  Esc", "keep / cancel (Esc clears)"),
+    ("General", ""),
+    ("?", "this help"),
+    ("q  Ctrl+C", "quit (asks first) / at once"),
+];
+
+/// A centered popup listing every key binding, closed by any key.
+fn render_help(frame: &mut Frame) {
+    let keys_width = HELP
+        .iter()
+        .map(|(keys, _)| keys.chars().count())
+        .max()
+        .unwrap_or(0);
+    let heading = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let key = Style::default().add_modifier(Modifier::BOLD);
+
+    let lines: Vec<Line> = HELP
+        .iter()
+        .map(|&(keys, action)| {
+            if action.is_empty() {
+                Line::from(Span::styled(format!(" {keys}"), heading))
+            } else {
+                Line::from(vec![
+                    Span::styled(format!("   {keys:<keys_width$}  "), key),
+                    Span::raw(format!("{action} ")),
+                ])
+            }
+        })
+        .collect();
+
+    let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 2;
+    let area = popup_area(frame.area(), width, lines.len() as u16 + 2);
+    let block = Block::default()
+        .title(" Keys ")
+        .title_alignment(Alignment::Center)
+        .title_bottom(Line::from(Span::styled(
+            " any key to close ",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 /// A centered popup showing `notice` until the next key press.
 fn render_notice(notice: &str, frame: &mut Frame) {
     let width = frame.area().width.saturating_sub(4).clamp(20, 70);
@@ -469,6 +538,21 @@ mod tests {
             popup_width(|frame| render_delete_confirmation(&delete_request("a.txt"), frame));
         assert_eq!(quit, CONFIRMATION_WIDTH as usize);
         assert_eq!(delete, quit);
+    }
+
+    #[test]
+    fn help_fits_a_standard_terminal() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(render_help).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+            .collect();
+        // Both the first and the last rows (and the closing hint) are shown.
+        assert!(screen.contains("move down / up"));
+        assert!(screen.contains("quit (asks first) / at once"));
+        assert!(screen.contains("any key to close"));
     }
 
     #[test]

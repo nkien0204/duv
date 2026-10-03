@@ -155,6 +155,9 @@ memory regressions.
   usage) changes.
 - Update this file (`AGENTS.md`) when architecture, conventions, or
   validation steps change materially.
+- When adding or changing a key binding, update the `HELP` table in
+  `src/ui.rs` (the `?` popup) and the README's key table too; keep the
+  popup within an 80×24 terminal (`help_fits_a_standard_terminal`).
 - Prefer real filesystem-backed integration tests for scanning logic over
   heavily mocked tests, since disk-usage correctness is the core value of
   this tool.

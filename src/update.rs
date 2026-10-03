@@ -20,6 +20,12 @@ pub fn update(app: &mut App, key_event: KeyEvent) {
         return;
     }
 
+    // So is the help popup; the key that closes it does nothing else.
+    if app.show_help {
+        app.show_help = false;
+        return;
+    }
+
     if let Some(request) = &mut app.delete_confirmation {
         match key_event.code {
             KeyCode::Left | KeyCode::Char('h') => request.choice = Choice::Yes,
@@ -104,6 +110,7 @@ pub fn update(app: &mut App, key_event: KeyEvent) {
             app.quit_confirmation = Some(Choice::No);
         }
         KeyCode::Char('/') => app.start_filter(),
+        KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('o') => app.reveal_selected(),
         KeyCode::Char('y') => app.copy_selected_path(),
         KeyCode::Esc => {
@@ -430,6 +437,42 @@ mod tests {
         app.status = Some("Copied something".to_string());
         press(&mut app, KeyCode::Char('j'));
         assert!(app.status.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn question_mark_opens_help_and_any_key_closes_it() {
+        let (mut app, dir) = filter_app("help");
+
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.show_help);
+
+        // The closing key does nothing else.
+        press(&mut app, KeyCode::Char('j'));
+        assert!(!app.show_help);
+        assert_eq!(app.scanner.as_ref().unwrap().selected, 0);
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.quit_confirmation.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn help_opens_on_the_disk_list_too() {
+        let mut app = App::new(DEFAULT_MEMORY_BUDGET);
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.show_help);
+    }
+
+    #[test]
+    fn question_mark_is_text_while_typing_a_filter() {
+        let (mut app, dir) = filter_app("help-filter");
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('?'));
+        assert!(!app.show_help);
+        assert_eq!(filter_query(&app).as_deref(), Some("?"));
 
         fs::remove_dir_all(&dir).ok();
     }
