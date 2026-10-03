@@ -26,6 +26,15 @@ part of the name, so `.mp4` or `cache` both work). `Enter` keeps the
 filter and returns to navigation, `Esc` cancels or clears it, and opening
 or leaving the folder clears it too.
 
+`o` opens the file manager with the entry selected (Finder, Explorer; on
+Linux, its folder via `xdg-open`). Where there's no desktop to show it on —
+over SSH, or on a server without a graphical display — it says so and
+suggests `y` instead. `y` copies the entry's full path using
+the system clipboard tool (`pbcopy`, PowerShell, or `wl-copy`/`xclip`/`xsel`
+on Linux). Over SSH, it asks your terminal to copy instead (OSC 52), so the
+path lands on *your* machine's clipboard; most modern terminals support
+this, macOS Terminal.app does not. Both also work on the disk list.
+
 Deleting moves the entry to the system Trash (Recycle Bin on Windows), so
 it can be restored; the space is freed once the Trash is emptied. The
 confirmation popup defaults to **No**.
@@ -85,6 +94,8 @@ overhead).
 | `s`                             | Start/Rescan               |
 | `d` / `Delete`                  | Move to Trash (asks first) |
 | `/`                             | Filter current folder      |
+| `o`                             | Show in file manager       |
+| `y`                             | Copy full path             |
 | `q`                             | Quit (with confirmation)   |
 | `Ctrl+C`                        | Quit unconditionally       |
 

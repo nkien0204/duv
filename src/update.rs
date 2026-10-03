@@ -12,6 +12,8 @@ use crate::app::{App, Choice, Jump};
 pub fn update(app: &mut App, key_event: KeyEvent) {
     // `gg` needs the previous key; any other key in between cancels it.
     let pending_g = std::mem::take(&mut app.pending_g);
+    // A status message only lasts until the next key.
+    app.status = None;
 
     // A notice is dismissed by any key.
     if app.notice.take().is_some() {
@@ -102,6 +104,8 @@ pub fn update(app: &mut App, key_event: KeyEvent) {
             app.quit_confirmation = Some(Choice::No);
         }
         KeyCode::Char('/') => app.start_filter(),
+        KeyCode::Char('o') => app.reveal_selected(),
+        KeyCode::Char('y') => app.copy_selected_path(),
         KeyCode::Esc => {
             let filtered = app
                 .scanner
@@ -416,6 +420,16 @@ mod tests {
 
         press(&mut app, KeyCode::Char('/'));
         assert!(!app.filter_input);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn status_message_lasts_until_the_next_key() {
+        let (mut app, dir) = filter_app("status");
+        app.status = Some("Copied something".to_string());
+        press(&mut app, KeyCode::Char('j'));
+        assert!(app.status.is_none());
 
         fs::remove_dir_all(&dir).ok();
     }

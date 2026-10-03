@@ -56,7 +56,16 @@ fn render_error(error: &str, frame: &mut Frame) {
 fn render_disks(app: &mut App, frame: &mut Frame) {
     let block = Block::default()
         .title(" DUV — disk usage visualizer ")
-        .title_bottom(key_hints(&[("j/k", "move"), ("s", "scan"), ("q", "quit")]))
+        .title_bottom(match app.status.as_deref() {
+            Some(status) => status_line(status),
+            None => key_hints(&[
+                ("j/k", "move"),
+                ("s", "scan"),
+                ("o", "reveal"),
+                ("y", "copy"),
+                ("q", "quit"),
+            ]),
+        })
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
@@ -129,6 +138,8 @@ fn render_disks(app: &mut App, frame: &mut Frame) {
 
 fn render_scan(app: &mut App, frame: &mut Frame) {
     let typing_filter = app.filter_input;
+    let status = app.status.clone();
+    let status = status.as_deref();
     let Some(scanner) = &mut app.scanner else {
         return;
     };
@@ -144,20 +155,23 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
     if is_scanning {
         block = block.border_style(Style::default().fg(Color::DarkGray));
     }
-    // The bottom border shows the filter while one is set, key hints
-    // otherwise.
-    block = block.title_bottom(match scanner.filter_query() {
-        Some(query) => filter_line(
+    // The bottom border shows, in order of priority: a status message, the
+    // filter while one is set, or key hints.
+    block = block.title_bottom(match (status, scanner.filter_query()) {
+        (Some(status), _) => status_line(status),
+        (None, Some(query)) => filter_line(
             query,
             typing_filter,
             scanner.entry_count(),
             scanner.unfiltered_count(),
         ),
-        None => key_hints(&[
+        (None, None) => key_hints(&[
             ("l", "open"),
             ("h", "back"),
             ("/", "filter"),
             ("d", "trash"),
+            ("o", "reveal"),
+            ("y", "copy"),
             ("s", "rescan"),
             ("q", "quit"),
         ]),
@@ -270,6 +284,17 @@ fn key_hints(hints: &[(&str, &str)]) -> Line<'static> {
     }
     spans.push(Span::raw(" "));
     Line::from(spans).left_aligned()
+}
+
+/// A bottom border line confirming an action (e.g. "Copied /path").
+fn status_line(status: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {status} "),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .left_aligned()
 }
 
 /// The bottom border line for a name filter: the query being typed (with
