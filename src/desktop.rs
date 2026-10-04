@@ -269,6 +269,9 @@ mod tests {
         assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
     }
 
+    // The freedesktop Trash only exists on Unix; elsewhere paths use other
+    // separators and this naming is never used.
+    #[cfg(unix)]
     #[test]
     fn freedesktop_trash_is_named_with_its_folder() {
         let home = Path::new("/home/kn");
