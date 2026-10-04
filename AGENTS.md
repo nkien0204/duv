@@ -180,6 +180,10 @@ language feature needs a newer Rust.
   section.
 - Update this file (`AGENTS.md`) when architecture, conventions, or
   validation steps change materially.
+- When a change is visible in the UI, regenerate the README images with
+  `cargo build --release && vhs assets/demo.tape` (needs VHS); the script
+  records a made-up folder from `assets/demo/make_demo.py`, never real
+  files.
 - When adding or changing a key binding, update the `HELP` table in
   `src/ui.rs` (the `?` popup) and the README's key table too; keep the
   popup within an 80×24 terminal (`help_fits_a_standard_terminal`).
