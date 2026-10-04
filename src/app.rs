@@ -58,6 +58,9 @@ pub struct App {
     /// A message to show in a popup until the next key press (e.g. a
     /// failed delete).
     pub notice: Option<String>,
+    /// What the Trash is called here (see `desktop::trash_name`), for the
+    /// delete confirmation and the status line after a delete.
+    pub trash_name: String,
     /// How scan results are ordered; applies to every scan, including new
     /// ones.
     pub sort: Sort,
@@ -113,6 +116,7 @@ impl Default for App {
             quit_confirmation: None,
             delete_confirmation: None,
             notice: None,
+            trash_name: desktop::trash_name(),
             sort: Sort::default(),
             show_help: false,
             status: None,
@@ -445,6 +449,13 @@ impl App {
                 for scanner in self.scanner.iter_mut().chain(&mut self.scanner_history) {
                     scanner.forget(&request.path, request.size);
                 }
+                // Moving to the Trash doesn't free space by itself, which
+                // is easy to miss where no desktop ever shows the Trash.
+                self.status = Some(format!(
+                    "Moved to {} · empty it to free {}",
+                    self.trash_name,
+                    disks::format_bytes(request.size)
+                ));
             }
             Err(err) => {
                 self.notice = Some(format!(
@@ -636,6 +647,8 @@ mod tests {
 
         assert!(!dir.join("big.bin").exists());
         assert_eq!(entry_names(&app), ["small.txt"]);
+        let status = app.status.as_deref().unwrap();
+        assert!(status.starts_with(&format!("Moved to {} · empty it to free ", app.trash_name)));
         assert_eq!(root_size(&app), small);
         assert_eq!(app.scanner.as_ref().unwrap().selected, 0);
         assert!(app.notice.is_none());
@@ -654,6 +667,7 @@ mod tests {
         app.confirm_delete();
 
         assert!(app.notice.as_ref().unwrap().contains("permission denied"));
+        assert!(app.status.is_none());
         assert_eq!(entry_names(&app), ["big.bin", "small.txt"]);
         assert_eq!(root_size(&app), before);
 

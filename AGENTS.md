@@ -148,6 +148,27 @@ For changes to scanning or the tree model, also compare
 after on a large directory (e.g. your home directory) to catch time or
 memory regressions.
 
+## Releasing
+
+1. Add user-facing changes to the `[Unreleased]` section of
+   `CHANGELOG.md` as they land.
+2. To release: bump `version` in `Cargo.toml` (and `Cargo.lock` via
+   `cargo build`), rename `[Unreleased]` in `CHANGELOG.md` to the new
+   version with today's date (adding a fresh empty `[Unreleased]` and
+   updating the compare links at the bottom), and merge to `main`.
+3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The release
+   workflow (`.github/workflows/release.yml`) checks that the tag matches
+   `Cargo.toml` and that `CHANGELOG.md` has that section, runs the tests,
+   builds binaries for macOS (arm64, x86_64), Linux (x86_64, static
+   musl) and Windows (x86_64), and publishes a GitHub Release with
+   checksums and that changelog section as the notes.
+4. Publish to crates.io by hand: `cargo publish` (needs a crates.io
+   token).
+
+`rust-version` in `Cargo.toml` (currently 1.95, set by `sysinfo`) is
+checked by the `msrv` CI job; raise both together when a dependency or
+language feature needs a newer Rust.
+
 ## Working with this repo as an agent
 
 - Keep changes minimal and scoped to what was asked. This is a young
@@ -155,7 +176,8 @@ memory regressions.
 - When adding a new feature area (e.g. the scanner or the TUI), add a
   short module-level doc comment (`//!`) explaining its purpose.
 - Update `README.md` when user-facing behavior (CLI flags, installation,
-  usage) changes.
+  usage) changes, and add an entry to `CHANGELOG.md`'s `[Unreleased]`
+  section.
 - Update this file (`AGENTS.md`) when architecture, conventions, or
   validation steps change materially.
 - When adding or changing a key binding, update the `HELP` table in

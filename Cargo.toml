@@ -2,7 +2,14 @@
 name = "duv"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
+description = "A fast terminal UI for finding and cleaning up what's using your disk space"
 license = "MIT"
+repository = "https://github.com/nkien0204/duv"
+readme = "README.md"
+keywords = ["disk-usage", "du", "tui", "terminal", "cleanup"]
+categories = ["command-line-utilities", "filesystem"]
+include = ["src/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [dependencies]
 anyhow = "1.0.104"

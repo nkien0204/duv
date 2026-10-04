@@ -7,8 +7,9 @@
 //! swap in fakes and never touch the real Trash, file manager or clipboard.
 
 use std::{
+    ffi::OsStr,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
 };
@@ -26,6 +27,43 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
         context.set_delete_method(DeleteMethod::NsFileManager);
     }
     context.delete(path).map_err(|err| err.to_string())
+}
+
+/// What the Trash is called on this platform, for messages: "the Trash",
+/// "the Recycle Bin", or on Linux and other freedesktop systems "the Trash"
+/// with its folder (e.g. `~/.local/share/Trash`), since there's often no
+/// desktop showing it.
+pub fn trash_name() -> String {
+    if cfg!(target_os = "macos") {
+        "the Trash".to_string()
+    } else if cfg!(windows) {
+        "the Recycle Bin".to_string()
+    } else {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        freedesktop_trash_name(
+            std::env::var_os("XDG_DATA_HOME").as_deref(),
+            home.as_deref(),
+        )
+    }
+}
+
+/// The freedesktop home Trash, `$XDG_DATA_HOME/Trash` (default
+/// `~/.local/share/Trash`), as "the Trash (<folder>)" with the home folder
+/// shown as `~`. Items on other drives may go to that drive's own Trash
+/// folder instead; this names the usual one.
+fn freedesktop_trash_name(xdg_data_home: Option<&OsStr>, home: Option<&Path>) -> String {
+    let data = xdg_data_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.map(|home| home.join(".local").join("share")));
+    let Some(folder) = data.map(|data| data.join("Trash")) else {
+        return "the Trash".to_string();
+    };
+    let shown = match home.and_then(|home| folder.strip_prefix(home).ok()) {
+        Some(relative) => format!("~/{}", relative.display()),
+        None => folder.display().to_string(),
+    };
+    format!("the Trash ({shown})")
 }
 
 /// Shows `path` in the platform's file manager: selected in its folder in
@@ -229,6 +267,29 @@ mod tests {
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
         assert_eq!(base64("/tmp/é".as_bytes()), "L3RtcC/DqQ==");
         assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
+    }
+
+    #[test]
+    fn freedesktop_trash_is_named_with_its_folder() {
+        let home = Path::new("/home/kn");
+        assert_eq!(
+            freedesktop_trash_name(None, Some(home)),
+            "the Trash (~/.local/share/Trash)"
+        );
+        assert_eq!(
+            freedesktop_trash_name(Some(OsStr::new("/home/kn/data")), Some(home)),
+            "the Trash (~/data/Trash)"
+        );
+        assert_eq!(
+            freedesktop_trash_name(Some(OsStr::new("/srv/xdg")), Some(home)),
+            "the Trash (/srv/xdg/Trash)"
+        );
+        // A relative XDG_DATA_HOME is invalid per the spec and ignored.
+        assert_eq!(
+            freedesktop_trash_name(Some(OsStr::new("relative")), Some(home)),
+            "the Trash (~/.local/share/Trash)"
+        );
+        assert_eq!(freedesktop_trash_name(None, None), "the Trash");
     }
 
     #[test]
