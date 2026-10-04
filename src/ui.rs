@@ -28,7 +28,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 
     if let Some(request) = &app.delete_confirmation {
-        render_delete_confirmation(request, frame);
+        render_delete_confirmation(request, &app.trash_name, frame);
     }
     if app.quit_confirmation.is_some() {
         render_quit_confirmation(app, frame);
@@ -374,12 +374,50 @@ fn render_quit_confirmation(app: &App, frame: &mut Frame) {
     render_confirmation(frame, " Quit ", message, choice);
 }
 
-fn render_delete_confirmation(request: &DeleteRequest, frame: &mut Frame) {
-    let message = vec![Line::from(Span::styled(
+/// The delete confirmation: the question, then a note that the space is
+/// only freed once `trash_name` (e.g. "the Trash (~/.local/share/Trash)")
+/// is emptied, wrapped to fit the popup in evenly balanced lines.
+fn render_delete_confirmation(request: &DeleteRequest, trash_name: &str, frame: &mut Frame) {
+    let question = Line::from(Span::styled(
         format!(" Move {} to the Trash? ", request.name),
         Style::default().add_modifier(Modifier::BOLD),
-    ))];
+    ));
+    let note_width = question.width().max(usize::from(CONFIRMATION_WIDTH) - 4);
+    let note = format!(
+        "Frees {} only when {trash_name} is emptied.",
+        format_bytes(request.size)
+    );
+    let mut message = vec![question, Line::from("")];
+    message.extend(wrap_balanced(&note, note_width).into_iter().map(Line::from));
     render_confirmation(frame, " Delete ", message, request.choice);
+}
+
+/// Like [`wrap_words`], but with lines as even as possible: the narrowest
+/// width that still needs no more lines than `width` does, so the last line
+/// isn't left with a single word.
+fn wrap_balanced(text: &str, width: usize) -> Vec<String> {
+    let line_count = wrap_words(text, width).len();
+    let mut narrowest = width;
+    while narrowest > 1 && wrap_words(text, narrowest - 1).len() == line_count {
+        narrowest -= 1;
+    }
+    wrap_words(text, narrowest)
+}
+
+/// Splits `text` into lines of at most `width` characters at spaces (a
+/// single longer word gets a line of its own).
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.chars().count() + 1 + word.chars().count() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
 }
 
 /// Minimum width of Yes/No popups, in columns.
@@ -388,10 +426,11 @@ const CONFIRMATION_WIDTH: u16 = 40;
 /// A centered Yes/No popup: `message` lines, a blank line, then the two
 /// buttons with `choice` highlighted.
 fn render_confirmation(frame: &mut Frame, title: &str, mut message: Vec<Line>, choice: Choice) {
-    let highlighted = Style::default()
-        .bg(Color::Yellow)
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
+    // Reverse video swaps the terminal's own text and background colors, so
+    // the highlighted button keeps the same text color as the other one
+    // and stays readable on any theme (fixed colors like black on yellow
+    // can lose contrast on some).
+    let highlighted = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
     let style = |button| {
         if choice == button {
             highlighted
@@ -580,8 +619,9 @@ mod tests {
             let message = vec![Line::from(" Are you sure you want to quit? ")];
             render_confirmation(frame, " Quit ", message, Choice::No);
         });
-        let delete =
-            popup_width(|frame| render_delete_confirmation(&delete_request("a.txt"), frame));
+        let delete = popup_width(|frame| {
+            render_delete_confirmation(&delete_request("a.txt"), "the Trash", frame)
+        });
         assert_eq!(quit, CONFIRMATION_WIDTH as usize);
         assert_eq!(delete, quit);
     }
@@ -629,9 +669,105 @@ mod tests {
     }
 
     #[test]
+    fn delete_popup_says_space_is_freed_only_when_the_trash_is_emptied() {
+        let linux_trash = "the Trash (~/.local/share/Trash)";
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| render_delete_confirmation(&delete_request("a.txt"), linux_trash, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains(
+                "Frees 4.0 KiB only when the Trash │ │ (~/.local/share/Trash) is emptied."
+            ),
+            "{words}"
+        );
+
+        // Wrapped to fit, so the popup keeps the quit popup's width.
+        let width = popup_width(|frame| {
+            render_delete_confirmation(&delete_request("a.txt"), linux_trash, frame)
+        });
+        assert_eq!(width, CONFIRMATION_WIDTH as usize);
+    }
+
+    #[test]
+    fn wrap_balanced_avoids_a_lonely_last_word() {
+        let text = "Frees 1.2 GiB only when the Trash is emptied.";
+        assert_eq!(
+            wrap_words(text, 36),
+            ["Frees 1.2 GiB only when the Trash is", "emptied."]
+        );
+        assert_eq!(
+            wrap_balanced(text, 36),
+            ["Frees 1.2 GiB only when", "the Trash is emptied."]
+        );
+        // The largest size label with the Linux folder still takes two lines.
+        let linux = "Frees 1023.9 GiB only when the Trash (~/.local/share/Trash) is emptied.";
+        let lines = wrap_balanced(linux, 36);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.len() <= 36));
+    }
+
+    #[test]
+    fn wrap_words_breaks_at_spaces() {
+        assert_eq!(wrap_words("aa bb cc", 5), ["aa bb", "cc"]);
+        assert_eq!(
+            wrap_words("a verylongword b", 4),
+            ["a", "verylongword", "b"]
+        );
+        assert!(wrap_words("", 10).is_empty());
+    }
+
+    #[test]
+    fn highlighted_button_uses_reverse_video_not_fixed_colors() {
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_delete_confirmation(
+                    &DeleteRequest {
+                        choice: Choice::Yes,
+                        ..delete_request("a.txt")
+                    },
+                    "the Trash",
+                    frame,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let cells: Vec<_> = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| &buffer[(x, y)])
+            .collect();
+        let yes = cells
+            .windows(3)
+            .find(|w| w.iter().map(|c| c.symbol()).collect::<String>() == "Yes")
+            .unwrap();
+        let no = cells
+            .windows(2)
+            .find(|w| w.iter().map(|c| c.symbol()).collect::<String>() == "No")
+            .unwrap();
+        // Same (default) colors as the other button; only reversed.
+        assert_eq!(yes[0].fg, no[0].fg);
+        assert_eq!(yes[0].bg, no[0].bg);
+        assert!(yes[0].modifier.contains(Modifier::REVERSED));
+        assert!(!no[0].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
     fn delete_popup_widens_for_long_names() {
         let name = "a-really-long-file-name-that-does-not-fit-in-forty-columns.tar.gz";
-        let width = popup_width(|frame| render_delete_confirmation(&delete_request(name), frame));
+        let width = popup_width(|frame| {
+            render_delete_confirmation(&delete_request(name), "the Trash", frame)
+        });
         let question = format!(" Move {name} to the Trash? ");
         assert_eq!(width, question.len() + 4);
     }

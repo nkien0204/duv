@@ -93,6 +93,12 @@ Holds all application state: `should_quit`, whether to show a quit confirmation
   backing out. A failure sets `notice` instead.
 - `notice: Option<String>` — a message shown in a popup until the next
   key press (failed deletes, reveals and copies).
+- `trash_name: String` — what the Trash is called here
+  (`desktop::trash_name`). The delete confirmation uses it to say the
+  space is freed only when the Trash is emptied, and a successful delete
+  sets a `status` like "Moved to the Trash (~/.local/share/Trash) · empty
+  it to free 1.2 GiB", since trashing doesn't free space by itself and
+  servers have no desktop showing the Trash.
 - `sort: Sort` — the chosen order. `cycle_sort()` (`t`) moves to the next
   column in its natural direction and `reverse_sort()` (`r`) flips the
   direction; both apply it to the current scanner and every one in
@@ -125,6 +131,9 @@ in duv:
 
 - `move_to_trash(path)` — the `trash` crate, using `NSFileManager` on
   macOS so it never triggers a Finder automation prompt.
+- `trash_name()` — "the Trash", "the Recycle Bin", or on Linux and other
+  freedesktop systems "the Trash (~/.local/share/Trash)" (honouring
+  `XDG_DATA_HOME`), for messages.
 - `reveal(path)` — `open -R` (macOS, selects the item in Finder),
   `explorer /select,` (Windows), or `xdg-open` on the containing folder
   (Linux and others, which have no standard way to select an item). It
@@ -414,8 +423,12 @@ rendering types. Dispatches on `App` state to one of three views:
   above.
 - `app.delete_confirmation` / `app.quit_confirmation` set — a centered
   Yes/No popup (`render_confirmation`, shared by both) over the current
-  view, laid out the same way: one bold question line (the delete one
-  names the entry), a blank line, then the buttons.
+  view: a bold question line (the delete one names the entry), a blank
+  line, then the buttons, with the highlighted button in reverse video
+  (the terminal's own colors swapped, so it's readable on any theme). The
+  delete popup also has a note between question and buttons, "Frees <size>
+  only when <trash> is emptied.", wrapped by `wrap_balanced` into even
+  lines so it keeps the quit popup's 40-column width.
 - `app.notice` set — a centered error popup on top of everything, closed
   by any key.
 
