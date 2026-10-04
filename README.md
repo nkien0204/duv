@@ -8,6 +8,8 @@ A fast terminal-based disk usage manager, written in Rust.
 consuming space, and lets you drill down and clean up without leaving the
 terminal.
 
+![duv scanning a folder, sorting, filtering and opening the delete confirmation](assets/demo.gif)
+
 ## Features
 
 - 🚀 **Fast, parallel scanning**: sizes fill in live while the scan runs
@@ -58,6 +60,8 @@ there goes back to the disk list. Also supports `--help` and `--version`.
 
 Press `?` in the app to see these at any time.
 
+![The ? help popup listing every key](assets/help.png)
+
 | Key                             | Action                     |
 | ------------------------------- | -------------------------- |
 | `j` / `k` / `↓` / `↑`           | Move selection             |
@@ -85,6 +89,8 @@ part of the name, so `.mp4` or `cache` both work). `Enter` keeps the
 filter and returns to navigation, `Esc` cancels or clears it, and opening
 or leaving the folder clears it too.
 
+![Filtering with /do, leaving Downloads and Documents](assets/filter.png)
+
 ### Sorting
 
 `t` switches the order between size (largest first), name (A to Z) and
@@ -94,11 +100,15 @@ ascending, `↓` descending). The choice applies to every folder and new
 scans. The Modified column shows how long ago each entry changed (for a
 folder, when its own entries last changed).
 
+![Entries sorted by modified time, newest first](assets/sort.png)
+
 ### Deleting
 
 Deleting moves the entry to the system Trash (Recycle Bin on Windows), so
 it can be restored; the space is freed once the Trash is emptied. The
 confirmation popup defaults to **No**.
+
+![The delete confirmation, defaulting to No](assets/delete.png)
 
 The confirmation says how much space emptying the Trash would free (and,
 on Linux, where the Trash folder is), and after the delete the status line
@@ -160,6 +170,14 @@ cargo run
 cargo test
 cargo fmt
 cargo clippy
+```
+
+The images in this README are recorded with [VHS](https://github.com/charmbracelet/vhs)
+on a made-up folder; to update them after UI changes:
+
+```sh
+cargo build --release
+vhs assets/demo.tape
 ```
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the code is organized, and
