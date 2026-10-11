@@ -6,6 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-11
+
+### Added
+
+- Prebuilt binary for ARM Linux (`aarch64`, statically linked), for
+  Raspberry Pi, ARM servers and VMs. CI now also tests on ARM Linux.
+
+### Fixed
+
+- The disk list's Used column now matches `df`: space a filesystem
+  reserves for root (e.g. ext4's 5%) is no longer counted as used.
+
 ## [0.1.0] - 2026-10-03
 
 First release.
@@ -38,5 +50,6 @@ First release.
   evicting the least recently visited ones.
 - Builds and tests on Linux, macOS and Windows in CI.
 
-[Unreleased]: https://github.com/nkien0204/duv/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nkien0204/duv/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/nkien0204/duv/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/nkien0204/duv/releases/tag/v0.1.0

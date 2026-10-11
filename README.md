@@ -33,9 +33,11 @@ With Rust 1.95 or newer:
 cargo install duv
 ```
 
-Or download a prebuilt binary for macOS, Linux or Windows from the
+Or download a prebuilt binary from the
 [Releases](https://github.com/nkien0204/duv/releases) page and put it on
-your `PATH`.
+your `PATH`. They're available for macOS (Apple silicon and Intel), Linux
+(x86-64 and ARM, statically linked so they run on any distribution) and
+Windows.
 
 Or build from source:
 
@@ -55,6 +57,10 @@ Without arguments, `duv` opens on the list of mounted disks; press `s` to
 scan the highlighted one. With a path (e.g. `duv .` for the current
 directory), it starts by scanning that directory; pressing `h`/`Esc` from
 there goes back to the disk list. Also supports `--help` and `--version`.
+
+The disk list's Used, Available and Total match `df`: on Linux, space a
+filesystem reserves for root (e.g. ext4's 5%) is neither used nor
+available, so Used and Available can add up to less than Total.
 
 ### Keys
 

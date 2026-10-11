@@ -824,6 +824,7 @@ mod tests {
             file_system: "ext4".to_string(),
             total_space: 100,
             available_space: 50,
+            free_space: 50,
             is_removable: false,
             kind: disks::DiskKind::Ssd,
         }];
