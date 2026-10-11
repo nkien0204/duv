@@ -59,8 +59,8 @@ changes.
   minimal feature set), `sysinfo` (disk/volume enumeration only,
   via `default-features = false, features = ["disk"]`), `rayon`
   (parallel directory-size scanning), `trash` (moving entries to the
-  system Trash), `libc` (Unix only, peak memory for the hidden `--stats`
-  developer flag).
+  system Trash), `libc` (Unix only: `statvfs` for disk free space and
+  `getrusage` for the hidden `--stats` developer flag).
 - Disk enumeration (`src/disks.rs`), full-tree directory scanning
   (`src/scanner.rs`) into a memory-budgeted in-memory tree
   (`src/model.rs`), drill-down navigation of that tree, and moving entries
@@ -133,7 +133,8 @@ If any of these fail because of pre-existing issues unrelated to your
 change, note it rather than silently ignoring it.
 
 CI (`.github/workflows/ci.yml`) runs the same checks on every push to
-`main` and every pull request, on Linux, macOS and Windows, with
+`main` and every pull request, on Linux (x86_64 and ARM), macOS and
+Windows, with
 `cargo clippy --all-targets -- -D warnings` (so any warning fails the
 build). Platform-specific code (`#[cfg(unix)]`, `#[cfg(target_os =
 "macos")]`) must therefore compile without warnings everywhere: gate
@@ -159,8 +160,9 @@ memory regressions.
 3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The release
    workflow (`.github/workflows/release.yml`) checks that the tag matches
    `Cargo.toml` and that `CHANGELOG.md` has that section, runs the tests,
-   builds binaries for macOS (arm64, x86_64), Linux (x86_64, static
-   musl) and Windows (x86_64), and publishes a GitHub Release with
+   builds binaries for macOS (arm64, x86_64), Linux (x86_64 and aarch64,
+   static musl; aarch64 on GitHub's native ARM runner) and Windows
+   (x86_64), and publishes a GitHub Release with
    checksums and that changelog section as the notes.
 4. Publish to crates.io by hand: `cargo publish` (needs a crates.io
    token).

@@ -165,6 +165,14 @@ isolated to this one module and `App` never has to know about it. This is
 the first step toward letting the user pick which disk/volume to scan;
 `App::new()` currently populates `disks` once at startup via `disks::list()`.
 
+`sysinfo` reports total and available space but not free space, which
+also counts blocks reserved for root (ext4 reserves 5% by default). So on
+Unix `free_space()` reads `statvfs`'s `f_bfree` directly (via `libc`), and
+`DiskInfo::used_space()` is total minus free, matching `df`'s Used. On
+Linux, Used and Available can therefore add up to less than Total, as in
+`df`; on macOS (APFS) and Windows, free equals available, so nothing
+changes there.
+
 Also home to `format_bytes()`, a small binary-unit (`KiB`/`MiB`/...)
 human-readable size formatter used by `ui.rs`.
 
@@ -479,7 +487,8 @@ tui.exit()?;
   `desktop.rs`, across macOS, Linux (freedesktop spec) and Windows. Platform
   trash APIs differ a lot, so a maintained crate is worth it; on macOS it
   adds a few small `objc2` crates.
-- **`libc`** (Unix only) — `getrusage` for peak memory in `stats.rs`.
+- **`libc`** (Unix only) — `statvfs` for free space in `disks.rs`, and
+  `getrusage` for peak memory in `stats.rs`.
   Already in the dependency tree via `crossterm`, so it adds no new crates.
 - **`rayon`** — work-stealing parallelism for recursively sizing
   directories in `scanner.rs`. This is the core value proposition of a

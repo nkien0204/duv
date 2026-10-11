@@ -43,9 +43,13 @@ jobs:
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-latest
-          # Statically linked, so it runs on any Linux distribution.
+          # Statically linked, so they run on any Linux distribution.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+          # Built natively on GitHub's ARM runner (Raspberry Pi, ARM
+          # servers and VMs).
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
