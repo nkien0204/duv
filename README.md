@@ -13,6 +13,8 @@ terminal.
 ## Features
 
 - 🚀 **Fast, parallel scanning**: sizes fill in live while the scan runs
+- 📊 **Usage bars**: each entry's share of its folder, and how full each
+  disk is, at a glance
 - 🌳 **Instant drill-down**: browse the scanned tree without rescanning
 - 🔃 **Sort** by size, name or last modified, in either direction
 - 🔍 **Filter** the current folder by name as you type
@@ -60,7 +62,13 @@ there goes back to the disk list. Also supports `--help` and `--version`.
 
 The disk list's Used, Available and Total match `df`: on Linux, space a
 filesystem reserves for root (e.g. ext4's 5%) is neither used nor
-available, so Used and Available can add up to less than Total.
+available, so Used and Available can add up to less than Total. Its Use
+column shows `df`'s Use% as a bar, green, then orange from 75% and red
+from 90%.
+
+In scan results, the Share column shows each entry's share of the folder
+you're in, as a bar and a percentage (still of the whole folder while a
+filter is set). Bars widen with the terminal.
 
 ### Keys
 
