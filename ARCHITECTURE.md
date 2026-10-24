@@ -401,7 +401,7 @@ rendering types. Dispatches on `App` state to one of three views:
   statefully with `app.disks_table_state` (name, mount point, filesystem,
   total/used/available space via `disks::format_bytes`, and a Use bar
   from `DiskInfo::used_fraction`/`used_percent`, df's rounded-up Use%,
-  colored green, yellow from 75% and red from 90%),
+  colored green, orange from 75% and red from 90%),
   highlighting the row at `app.selected` and auto-scrolling to keep it in
   view once the list is taller than the terminal.
 - A scan or in-place load in progress (`app.scanner` is `Some` and not
@@ -418,12 +418,16 @@ rendering types. Dispatches on `App` state to one of three views:
   entry's size over `scanner.current_size()` (the whole folder, even with
   a filter set), drawn by `usage_bar`.
 - Usage bars (`usage_bar`, `bar_fill`) use eighth-block characters so
-  their end is drawn to 1/8 of a cell, on a dim `░` track. Columns other
-  than names have fixed widths and names take the rest (`Constraint::Fill`);
-  `bar_width` sizes the bar from the terminal width (5 to 20 cells, keeping
-  names at least 24). Bars are colored only on ordinary rows: on the
-  highlighted row (and while scanning) they take the row's own colors over
-  a blank track, so the black-on-yellow highlight stays readable.
+  their end is drawn to 1/8 of a cell, padded with plain background (no
+  textured track: it clashed with the unfilled part of a partly filled
+  last cell, which showed as a dark notch). Columns other than names have
+  fixed widths and names take the rest (`Constraint::Fill`); `bar_width`
+  sizes the bar from the terminal width (5 to 20 cells, keeping names at
+  least 24). Bars keep their color on every row, and on the highlighted
+  row the yellow highlight runs unbroken under them. That's why the disk
+  list's middle level is orange (`DISK_WARNING`) rather than yellow, which
+  would vanish into the highlight. While scanning, bars are uncolored like
+  the rest of the row.
 - Each full-screen view's top border is just its title ("DUV — <path>",
   "DUV — disk usage visualizer", "DUV — error"), and its bottom border
   lists the keys that work there (`key_hints`, e.g. "l open · h back ·

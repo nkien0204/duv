@@ -116,12 +116,10 @@ fn render_disks(app: &mut App, frame: &mut Frame) {
         } else {
             Style::default()
         };
-        // Green, then yellow and red as the disk fills up (not on the
-        // highlighted row, which keeps its readable black on yellow).
+        // Green, then orange and red as the disk fills up.
         let fill = match disk.used_percent() {
-            _ if selected => None,
             0..75 => Some(Color::Green),
-            75..90 => Some(Color::Yellow),
+            75..90 => Some(DISK_WARNING),
             _ => Some(Color::Red),
         };
         let name = if disk.name.is_empty() {
@@ -276,8 +274,8 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
             } else {
                 Style::default()
             };
-            // Colored only where the row doesn't set its own colors.
-            let fill = (!is_scanning && i != selected).then_some(Color::Cyan);
+            // Gray like the rest of the row while scanning.
+            let fill = (!is_scanning).then_some(Color::Cyan);
             Row::new(vec![
                 Cell::from(entry.name.to_string()),
                 Cell::from(if entry.is_dir() { "Dir" } else { "File" }),
@@ -386,24 +384,25 @@ fn bar_fill(fraction: f64, cells: u16) -> String {
     fill
 }
 
-/// A usage bar cell: the bar filled to `fraction`, then `percent`. With a
-/// `fill` color the bar sits on a dim `░` track that shows its full
-/// length; without one (the highlighted row, or while scanning) it takes
-/// the row's own colors over a blank track, which stays readable on the
-/// row's background.
+/// A usage bar cell: the bar filled to `fraction` in `fill` (or the row's
+/// own color while scanning, when `fill` is `None`), padded to `cells`,
+/// then `percent`. The padding is plain background: a textured track would
+/// clash with the unfilled part of a bar's last, partly filled cell, and
+/// blank space lets a highlighted row's highlight run unbroken.
 fn usage_bar(fraction: f64, percent: &str, cells: u16, fill: Option<Color>) -> Line<'static> {
     let filled = bar_fill(fraction, cells);
     let rest = usize::from(cells).saturating_sub(filled.chars().count());
-    let (fill_style, track) = match fill {
-        Some(color) => (Style::default().fg(color), "░".repeat(rest)),
-        None => (Style::default(), " ".repeat(rest)),
-    };
+    let fill_style = fill.map_or_else(Style::default, |color| Style::default().fg(color));
     Line::from(vec![
         Span::styled(filled, fill_style),
-        Span::styled(track, Style::default().fg(Color::DarkGray)),
+        Span::raw(" ".repeat(rest)),
         Span::raw(format!(" {percent}")),
     ])
 }
+
+/// The disk list's middle fullness level (75% to 90%). Orange rather than
+/// yellow so it still shows on the yellow highlighted row.
+const DISK_WARNING: Color = Color::Indexed(208);
 
 /// How long ago `modified` (seconds since the Unix epoch) was, relative to
 /// `now`, e.g. "3 days ago". Shown as an age rather than a date because
@@ -772,36 +771,49 @@ mod tests {
     }
 
     #[test]
-    fn usage_bar_has_a_constant_width_and_colors_only_when_asked() {
+    fn usage_bar_has_a_constant_width_and_no_track() {
         let colored = usage_bar(0.25, " 25%", 8, Some(Color::Cyan));
         assert_eq!(colored.width(), 8 + 1 + 4);
         assert_eq!(colored.spans[0].content, "██");
         assert_eq!(colored.spans[0].style.fg, Some(Color::Cyan));
+        // Plain padding, no textured track, and no background of its own,
+        // so a highlighted row's highlight shows through.
+        assert_eq!(colored.spans[1].content, " ".repeat(6));
+        assert!(colored.spans.iter().all(|span| span.style.bg.is_none()));
 
-        // On the highlighted row the bar takes the row's own colors, over a
-        // blank track.
+        // Without a color (while scanning) it takes the row's colors.
         let plain = usage_bar(0.25, " 25%", 8, None);
         assert_eq!(plain.width(), 8 + 1 + 4);
         assert!(plain.spans[0].style.fg.is_none());
-        assert_eq!(plain.spans[1].content.trim(), "");
     }
 
-    /// Every cell of a full render of `app`, as (symbol, foreground) rows.
-    fn render_cells(app: &mut App, width: u16, height: u16) -> Vec<Vec<(String, Color)>> {
+    /// Every cell of a full render of `app`, as (symbol, foreground,
+    /// background) rows.
+    fn render_cells(app: &mut App, width: u16, height: u16) -> Vec<Vec<(String, Color, Color)>> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
             .map(|y| {
                 (0..width)
-                    .map(|x| (buffer[(x, y)].symbol().to_string(), buffer[(x, y)].fg))
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        (cell.symbol().to_string(), cell.fg, cell.bg)
+                    })
                     .collect()
             })
             .collect()
     }
 
-    fn row_text(row: &[(String, Color)]) -> String {
-        row.iter().map(|(symbol, _)| symbol.as_str()).collect()
+    fn row_text(row: &[(String, Color, Color)]) -> String {
+        row.iter().map(|(symbol, _, _)| symbol.as_str()).collect()
+    }
+
+    /// The (foreground, background) of the first full bar block in `row`.
+    fn bar_colors(row: &[(String, Color, Color)]) -> Option<(Color, Color)> {
+        row.iter()
+            .find(|(symbol, _, _)| symbol == "█")
+            .map(|&(_, fg, bg)| (fg, bg))
     }
 
     #[test]
@@ -831,14 +843,21 @@ mod tests {
         assert!(row_text(big).contains("75%") || row_text(big).contains("74%"));
         assert!(row_text(small).contains("25%") || row_text(small).contains("26%"));
 
-        // The highlighted row's bar keeps the row's black; others are cyan.
-        let bar_color = |row: &[(String, Color)]| {
-            row.iter()
-                .find(|(symbol, _)| symbol == "█")
-                .map(|(_, fg)| *fg)
-        };
-        assert_eq!(bar_color(big), Some(Color::Black), "highlighted row");
-        assert_eq!(bar_color(small), Some(Color::Cyan));
+        // Bars are cyan on every row, including the highlighted one...
+        assert_eq!(bar_colors(big).map(|(fg, _)| fg), Some(Color::Cyan));
+        assert_eq!(bar_colors(small), Some((Color::Cyan, Color::Reset)));
+        // ...whose highlight runs unbroken under its bar and blank track.
+        let inside_border = &big[1..big.len() - 1];
+        assert!(
+            inside_border.iter().all(|(_, _, bg)| *bg == Color::Yellow),
+            "{}",
+            row_text(big)
+        );
+        // No textured track anywhere (it clashed with partly filled cells).
+        assert!(screen.iter().all(|row| !row_text(row).contains('░')));
+        // The rest of the highlighted row is still highlighted.
+        let name_cell = big.iter().find(|(symbol, _, _)| symbol == "b").unwrap();
+        assert_eq!(name_cell.2, Color::Yellow);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -871,19 +890,20 @@ mod tests {
                 .find(|row| row_text(row).contains(name))
                 .unwrap()
         };
-        let bar_color = |name: &str| {
-            row(name)
-                .iter()
-                .find(|(symbol, _)| symbol == "█")
-                .map(|(_, fg)| *fg)
-        };
+        let bar_color = |name: &str| bar_colors(row(name)).map(|(fg, _)| fg);
         assert!(row_text(row("roomy")).contains(" 40%"));
         assert!(row_text(row("tight")).contains(" 80%"));
         assert!(row_text(row("full")).contains(" 95%"));
         assert_eq!(bar_color("roomy"), Some(Color::Green));
-        assert_eq!(bar_color("tight"), Some(Color::Yellow));
+        assert_eq!(bar_color("tight"), Some(DISK_WARNING));
         assert_eq!(bar_color("full"), Some(Color::Red));
-        assert_eq!(bar_color("first"), Some(Color::Black), "highlighted row");
+        // The highlighted row keeps its fullness color, on the unbroken
+        // highlight (which is why the middle level is orange, not yellow).
+        assert_eq!(
+            bar_colors(row("first")),
+            Some((Color::Green, Color::Yellow))
+        );
+        assert_ne!(DISK_WARNING, Color::Yellow);
     }
 
     #[test]

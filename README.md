@@ -63,7 +63,7 @@ there goes back to the disk list. Also supports `--help` and `--version`.
 The disk list's Used, Available and Total match `df`: on Linux, space a
 filesystem reserves for root (e.g. ext4's 5%) is neither used nor
 available, so Used and Available can add up to less than Total. Its Use
-column shows `df`'s Use% as a bar, green, then yellow from 75% and red
+column shows `df`'s Use% as a bar, green, then orange from 75% and red
 from 90%.
 
 In scan results, the Share column shows each entry's share of the folder

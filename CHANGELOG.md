@@ -6,11 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-24
+
 ### Added
 
 - Usage bars: scan results get a Share column showing each entry's share
   of the current folder as a bar and percentage, and the disk list gets
-  a Use column with `df`'s Use% as a bar, colored green, yellow (from
+  a Use column with `df`'s Use% as a bar, colored green, orange (from
   75%) and red (from 90%). Bars widen with the terminal.
 
 ### Changed
@@ -63,6 +65,7 @@ First release.
   evicting the least recently visited ones.
 - Builds and tests on Linux, macOS and Windows in CI.
 
-[Unreleased]: https://github.com/nkien0204/duv/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/nkien0204/duv/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/nkien0204/duv/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/nkien0204/duv/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/nkien0204/duv/releases/tag/v0.1.0
