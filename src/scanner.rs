@@ -326,6 +326,12 @@ impl Scanner {
         self.tree.root_path()
     }
 
+    /// Total size of the directory currently shown, the whole that each
+    /// entry's share is measured against.
+    pub fn current_size(&self) -> u64 {
+        self.tree.get(self.current).map_or(0, |node| node.size)
+    }
+
     /// The path of the directory currently shown.
     pub fn current_path(&self) -> PathBuf {
         self.tree

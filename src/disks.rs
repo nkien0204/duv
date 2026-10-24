@@ -39,14 +39,32 @@ impl DiskInfo {
         self.total_space.saturating_sub(self.free_space)
     }
 
-    /// Fraction of the disk in use, in `0.0..=1.0`. Returns `0.0` for a
-    /// zero-sized disk rather than dividing by zero.
+    /// Fraction of the disk in use, in `0.0..=1.0`, the way `df` computes
+    /// Use%: used over used plus available, so space reserved for root
+    /// doesn't make a full disk look less full. `0.0` for an empty or
+    /// zero-sized disk.
     pub fn used_fraction(&self) -> f64 {
-        if self.total_space == 0 {
+        let used = self.used_space();
+        let usable = used.saturating_add(self.available_space);
+        if usable == 0 {
             0.0
         } else {
-            self.used_space() as f64 / self.total_space as f64
+            used as f64 / usable as f64
         }
+    }
+
+    /// [`DiskInfo::used_fraction`] as a whole percentage, rounded up like
+    /// `df`'s Use% (so a nearly full disk never shows 100% too early, and
+    /// any use at all shows at least 1%).
+    pub fn used_percent(&self) -> u8 {
+        let used = self.used_space();
+        let usable = used.saturating_add(self.available_space);
+        if usable == 0 {
+            return 0;
+        }
+        // Integer ceiling, as in df, avoiding float rounding at the edges.
+        let percent = (u128::from(used) * 100).div_ceil(u128::from(usable));
+        percent.min(100) as u8
     }
 }
 
@@ -210,6 +228,21 @@ mod tests {
 
         // Where nothing is reserved, used is simply total minus available.
         assert_eq!(disk(100, 40, 40).used_space(), 60);
+    }
+
+    #[test]
+    fn used_percent_rounds_up_like_df() {
+        // Your Ubuntu server's `/`: df shows 55% for 5.1G used, 4.2G free.
+        const TENTH_GIB: u64 = 1024 * 1024 * 1024 / 10;
+        let root = disk(98 * TENTH_GIB, 42 * TENTH_GIB, 47 * TENTH_GIB);
+        assert_eq!(root.used_percent(), 55);
+        assert!((root.used_fraction() - 51.0 / 93.0).abs() < 1e-9);
+
+        assert_eq!(disk(100, 100, 100).used_percent(), 0);
+        assert_eq!(disk(1000, 999, 999).used_percent(), 1, "any use shows");
+        assert_eq!(disk(1000, 1, 1).used_percent(), 100);
+        assert_eq!(disk(0, 0, 0).used_percent(), 0);
+        assert_eq!(disk(0, 0, 0).used_fraction(), 0.0);
     }
 
     #[cfg(unix)]

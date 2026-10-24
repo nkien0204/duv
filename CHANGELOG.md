@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Usage bars: scan results get a Share column showing each entry's share
+  of the current folder as a bar and percentage, and the disk list gets
+  a Use column with `df`'s Use% as a bar, colored green, yellow (from
+  75%) and red (from 90%). Bars widen with the terminal.
+
+### Changed
+
+- The disk list drops its Type (SSD/HDD) column, often "Unknown" on
+  Linux and VMs, to make room for the Use bar; the Filesystem column is
+  now headed "FS".
+
 ## [0.1.1] - 2026-10-11
 
 ### Added

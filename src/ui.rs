@@ -89,22 +89,40 @@ fn render_disks(app: &mut App, frame: &mut Frame) {
     let header = Row::new(vec![
         Cell::from("Name"),
         Cell::from("Mount point"),
-        Cell::from("Type"),
-        Cell::from("Filesystem"),
+        Cell::from("FS"),
+        Cell::from("Total"),
         Cell::from("Used"),
         Cell::from("Available"),
-        Cell::from("Total"),
+        Cell::from("Use"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
+    // Name and mount point share what the fixed columns leave.
+    // Filesystem types are short (apfs, ext4, btrfs, exfat, ntfs).
+    const FILESYSTEM: u16 = 7;
+    const SIZE: u16 = 10;
+    let bar_cells = bar_width(
+        frame.area().width,
+        FILESYSTEM + 3 * SIZE + PERCENT_WIDTH + 6,
+    );
+
     let rows = app.disks.iter().enumerate().map(|(i, disk)| {
-        let style = if i == app.selected {
+        let selected = i == app.selected;
+        let style = if selected {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
+        };
+        // Green, then yellow and red as the disk fills up (not on the
+        // highlighted row, which keeps its readable black on yellow).
+        let fill = match disk.used_percent() {
+            _ if selected => None,
+            0..75 => Some(Color::Green),
+            75..90 => Some(Color::Yellow),
+            _ => Some(Color::Red),
         };
         let name = if disk.name.is_empty() {
             disk.mount_point.clone()
@@ -114,11 +132,16 @@ fn render_disks(app: &mut App, frame: &mut Frame) {
         Row::new(vec![
             Cell::from(name),
             Cell::from(disk.mount_point.clone()),
-            Cell::from(Line::from(disk.kind.to_string())),
             Cell::from(disk.file_system.clone()),
+            Cell::from(format_bytes(disk.total_space)),
             Cell::from(format_bytes(disk.used_space())),
             Cell::from(format_bytes(disk.available_space)),
-            Cell::from(format_bytes(disk.total_space)),
+            Cell::from(usage_bar(
+                disk.used_fraction(),
+                &format!("{:>3}%", disk.used_percent()),
+                bar_cells,
+                fill,
+            )),
         ])
         .style(style)
     });
@@ -126,13 +149,13 @@ fn render_disks(app: &mut App, frame: &mut Frame) {
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Length(FILESYSTEM),
+            Constraint::Length(SIZE),
+            Constraint::Length(SIZE),
+            Constraint::Length(SIZE),
+            Constraint::Length(bar_cells + PERCENT_WIDTH),
         ],
     )
     .header(header)
@@ -222,6 +245,7 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
             column("Name", SortBy::Name),
             Cell::from("Type"),
             column("Size", SortBy::Size),
+            Cell::from("Share"),
             column("Modified", SortBy::Modified),
         ])
         .style(header_style);
@@ -229,6 +253,17 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
+        // Name takes what the fixed columns leave; the bar adapts too.
+        const TYPE: u16 = 4;
+        const SIZE: u16 = 10;
+        const MODIFIED: u16 = 14;
+        let bar_cells = bar_width(
+            frame.area().width,
+            TYPE + SIZE + MODIFIED + PERCENT_WIDTH + 4,
+        );
+        // Shares are of the whole folder, even when a filter hides some
+        // entries.
+        let folder_size = scanner.current_size();
         let selected = scanner.selected;
         let rows = scanner.entries().enumerate().map(|(i, entry)| {
             let style = if is_scanning {
@@ -241,10 +276,18 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
             } else {
                 Style::default()
             };
+            // Colored only where the row doesn't set its own colors.
+            let fill = (!is_scanning && i != selected).then_some(Color::Cyan);
             Row::new(vec![
                 Cell::from(entry.name.to_string()),
                 Cell::from(if entry.is_dir() { "Dir" } else { "File" }),
                 Cell::from(format_bytes(entry.size)),
+                Cell::from(usage_bar(
+                    fraction(entry.size, folder_size),
+                    &share_percent(entry.size, folder_size),
+                    bar_cells,
+                    fill,
+                )),
                 Cell::from(age(entry.modified, now)),
             ])
             .style(style)
@@ -253,10 +296,11 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(50),
-                Constraint::Percentage(10),
-                Constraint::Percentage(18),
-                Constraint::Percentage(22),
+                Constraint::Fill(1),
+                Constraint::Length(TYPE),
+                Constraint::Length(SIZE),
+                Constraint::Length(bar_cells + PERCENT_WIDTH),
+                Constraint::Length(MODIFIED),
             ],
         )
         .header(header)
@@ -288,6 +332,77 @@ fn render_scan(app: &mut App, frame: &mut Frame) {
         frame.render_widget(Clear, area);
         frame.render_widget(gauge, area);
     }
+}
+
+/// Width of the percentage after a usage bar: a space and up to "100%".
+const PERCENT_WIDTH: u16 = 5;
+
+/// The narrowest and widest a usage bar gets, in cells.
+const BAR_MIN: u16 = 5;
+const BAR_MAX: u16 = 20;
+
+/// The flexible columns (names) keep at least this many cells.
+const NAME_MIN: u16 = 24;
+
+/// How wide a usage bar can be in a full-screen table `screen_width`
+/// cells wide, given the cells the other fixed columns (including column
+/// gaps) take: whatever's left after the names get [`NAME_MIN`], kept
+/// within [`BAR_MIN`]..=[`BAR_MAX`].
+fn bar_width(screen_width: u16, fixed: u16) -> u16 {
+    // The table sits inside a border on each side.
+    let inner = screen_width.saturating_sub(2);
+    inner
+        .saturating_sub(fixed + NAME_MIN)
+        .clamp(BAR_MIN, BAR_MAX)
+}
+
+/// `part / whole`, or `0.0` when `whole` is zero.
+fn fraction(part: u64, whole: u64) -> f64 {
+    if whole == 0 {
+        0.0
+    } else {
+        part as f64 / whole as f64
+    }
+}
+
+/// `part`'s share of `whole` as a right-aligned percentage, "<1%" for a
+/// tiny but nonzero share rather than a misleading "0%".
+fn share_percent(part: u64, whole: u64) -> String {
+    let percent = fraction(part, whole) * 100.0;
+    if part > 0 && percent < 1.0 {
+        " <1%".to_string()
+    } else {
+        format!("{:>3.0}%", percent.min(100.0))
+    }
+}
+
+/// The filled part of a `cells`-wide bar for `fraction` (`0.0..=1.0`),
+/// using eighth-block characters so the end is drawn to 1/8 of a cell.
+fn bar_fill(fraction: f64, cells: u16) -> String {
+    const PARTIAL: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    let eighths = (fraction.clamp(0.0, 1.0) * f64::from(cells) * 8.0).round() as usize;
+    let mut fill = "█".repeat(eighths / 8);
+    fill.push_str(PARTIAL[eighths % 8]);
+    fill
+}
+
+/// A usage bar cell: the bar filled to `fraction`, then `percent`. With a
+/// `fill` color the bar sits on a dim `░` track that shows its full
+/// length; without one (the highlighted row, or while scanning) it takes
+/// the row's own colors over a blank track, which stays readable on the
+/// row's background.
+fn usage_bar(fraction: f64, percent: &str, cells: u16, fill: Option<Color>) -> Line<'static> {
+    let filled = bar_fill(fraction, cells);
+    let rest = usize::from(cells).saturating_sub(filled.chars().count());
+    let (fill_style, track) = match fill {
+        Some(color) => (Style::default().fg(color), "░".repeat(rest)),
+        None => (Style::default(), " ".repeat(rest)),
+    };
+    Line::from(vec![
+        Span::styled(filled, fill_style),
+        Span::styled(track, Style::default().fg(Color::DarkGray)),
+        Span::raw(format!(" {percent}")),
+    ])
 }
 
 /// How long ago `modified` (seconds since the Unix epoch) was, relative to
@@ -624,6 +739,151 @@ mod tests {
         });
         assert_eq!(quit, CONFIRMATION_WIDTH as usize);
         assert_eq!(delete, quit);
+    }
+
+    #[test]
+    fn bar_fill_draws_to_an_eighth_of_a_cell() {
+        assert_eq!(bar_fill(0.0, 4), "");
+        assert_eq!(bar_fill(1.0, 4), "████");
+        assert_eq!(bar_fill(0.5, 4), "██");
+        assert_eq!(bar_fill(1.0 / 32.0, 4), "▏", "one eighth of a cell");
+        assert_eq!(bar_fill(0.5 + 3.0 / 32.0, 4), "██▍");
+        assert_eq!(bar_fill(2.0, 4), "████", "clamped to full");
+        assert_eq!(bar_fill(-1.0, 4), "", "clamped to empty");
+    }
+
+    #[test]
+    fn share_percent_never_shows_a_misleading_zero() {
+        assert_eq!(share_percent(0, 0), "  0%");
+        assert_eq!(share_percent(0, 100), "  0%");
+        assert_eq!(share_percent(1, 1_000), " <1%");
+        assert_eq!(share_percent(50, 100), " 50%");
+        assert_eq!(share_percent(100, 100), "100%");
+    }
+
+    #[test]
+    fn bars_adapt_to_the_terminal_width() {
+        // The scan table's fixed columns: type, size, modified, percent
+        // and four gaps.
+        let fixed = 4 + 10 + 14 + PERCENT_WIDTH + 4;
+        assert_eq!(bar_width(80, fixed), 17);
+        assert_eq!(bar_width(40, fixed), BAR_MIN, "never thinner");
+        assert_eq!(bar_width(200, fixed), BAR_MAX, "never wider");
+    }
+
+    #[test]
+    fn usage_bar_has_a_constant_width_and_colors_only_when_asked() {
+        let colored = usage_bar(0.25, " 25%", 8, Some(Color::Cyan));
+        assert_eq!(colored.width(), 8 + 1 + 4);
+        assert_eq!(colored.spans[0].content, "██");
+        assert_eq!(colored.spans[0].style.fg, Some(Color::Cyan));
+
+        // On the highlighted row the bar takes the row's own colors, over a
+        // blank track.
+        let plain = usage_bar(0.25, " 25%", 8, None);
+        assert_eq!(plain.width(), 8 + 1 + 4);
+        assert!(plain.spans[0].style.fg.is_none());
+        assert_eq!(plain.spans[1].content.trim(), "");
+    }
+
+    /// Every cell of a full render of `app`, as (symbol, foreground) rows.
+    fn render_cells(app: &mut App, width: u16, height: u16) -> Vec<Vec<(String, Color)>> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| (buffer[(x, y)].symbol().to_string(), buffer[(x, y)].fg))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn row_text(row: &[(String, Color)]) -> String {
+        row.iter().map(|(symbol, _)| symbol.as_str()).collect()
+    }
+
+    #[test]
+    fn scan_results_show_each_entrys_share_of_the_folder() {
+        let dir = std::env::temp_dir().join(format!("duv-ui-share-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("big.bin"), vec![0u8; 300_000]).unwrap();
+        std::fs::write(dir.join("small.bin"), vec![0u8; 100_000]).unwrap();
+        let mut app = App::with_start_path(dir.clone(), crate::scanner::DEFAULT_MEMORY_BUDGET);
+        while !app.scanner.as_ref().unwrap().finished {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let screen = render_cells(&mut app, 80, 6);
+        assert!(row_text(&screen[1]).contains("Share"));
+        let big = screen
+            .iter()
+            .find(|row| row_text(row).contains("big.bin"))
+            .unwrap();
+        let small = screen
+            .iter()
+            .find(|row| row_text(row).contains("small.bin"))
+            .unwrap();
+        // Roughly 3:1, as allocated sizes may round up to whole blocks.
+        assert!(row_text(big).contains("75%") || row_text(big).contains("74%"));
+        assert!(row_text(small).contains("25%") || row_text(small).contains("26%"));
+
+        // The highlighted row's bar keeps the row's black; others are cyan.
+        let bar_color = |row: &[(String, Color)]| {
+            row.iter()
+                .find(|(symbol, _)| symbol == "█")
+                .map(|(_, fg)| *fg)
+        };
+        assert_eq!(bar_color(big), Some(Color::Black), "highlighted row");
+        assert_eq!(bar_color(small), Some(Color::Cyan));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn disk_list_shows_df_style_use_colored_by_fullness() {
+        use crate::disks::{DiskInfo, DiskKind};
+        let disk = |name: &str, available: u64| DiskInfo {
+            name: name.to_string(),
+            mount_point: format!("/{name}"),
+            file_system: "ext4".to_string(),
+            total_space: 1000,
+            available_space: available,
+            free_space: available,
+            is_removable: false,
+            kind: DiskKind::Ssd,
+        };
+        let mut app = App::new(crate::scanner::DEFAULT_MEMORY_BUDGET);
+        app.disks = vec![
+            disk("first", 500),
+            disk("roomy", 600),
+            disk("tight", 200),
+            disk("full", 50),
+        ];
+
+        let screen = render_cells(&mut app, 80, 8);
+        let row = |name: &str| {
+            screen
+                .iter()
+                .find(|row| row_text(row).contains(name))
+                .unwrap()
+        };
+        let bar_color = |name: &str| {
+            row(name)
+                .iter()
+                .find(|(symbol, _)| symbol == "█")
+                .map(|(_, fg)| *fg)
+        };
+        assert!(row_text(row("roomy")).contains(" 40%"));
+        assert!(row_text(row("tight")).contains(" 80%"));
+        assert!(row_text(row("full")).contains(" 95%"));
+        assert_eq!(bar_color("roomy"), Some(Color::Green));
+        assert_eq!(bar_color("tight"), Some(Color::Yellow));
+        assert_eq!(bar_color("full"), Some(Color::Red));
+        assert_eq!(bar_color("first"), Some(Color::Black), "highlighted row");
     }
 
     #[test]

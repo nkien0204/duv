@@ -32,7 +32,8 @@ memory budget (`--memory-budget`, default 256 MiB): over budget,
 directories are stored as totals only, loaded in place when opened, and
 least recently visited branches are evicted to make room. `ui`
 shows a progress `Gauge` (with a border) while it runs and a size-sorted
-`Table` once finished. Drilling into a subdirectory (`l`/`Right`/`Enter`)
+`Table` once finished, with a usage bar per entry (its share of the
+folder); the disk list has a Use bar per disk. Drilling into a subdirectory (`l`/`Right`/`Enter`)
 and backing out (`h`/`Left`/`Backspace`/`Esc`) move around that tree with
 no rescanning (or a load in place for budget-skipped directories); only
 directories on another filesystem or unreadable ones spawn another

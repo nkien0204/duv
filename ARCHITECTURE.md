@@ -398,8 +398,10 @@ visible list rows, used by page jumps). Keeping this a free function (rather tha
 rendering types. Dispatches on `App` state to one of three views:
 
 - No scan open and no error — `app.disks` as a `Table`, rendered
-  statefully with `app.disks_table_state` (name, mount point, kind,
-  filesystem, used/available/total space via `disks::format_bytes`),
+  statefully with `app.disks_table_state` (name, mount point, filesystem,
+  total/used/available space via `disks::format_bytes`, and a Use bar
+  from `DiskInfo::used_fraction`/`used_percent`, df's rounded-up Use%,
+  colored green, yellow from 75% and red from 90%),
   highlighting the row at `app.selected` and auto-scrolling to keep it in
   view once the list is taller than the terminal.
 - A scan or in-place load in progress (`app.scanner` is `Some` and not
@@ -407,12 +409,21 @@ rendering types. Dispatches on `App` state to one of three views:
   `scanner.measured / scanner.total` subdirectories of the directory being
   scanned, over the entries found so far.
 - A finished scan — a `Table` of `scanner.entries()` for the directory
-  currently shown (name, Dir/File, size, modified), in the scanner's sort
+  currently shown (name, Dir/File, size, share, modified), in the scanner's sort
   order (its column header gets an arrow: `↑` ascending, `↓` descending) and titled with
   `scanner.current_path()`, rendered statefully with `scanner.table_state`
   (same highlighting/auto-scroll behavior as the disk table). Modified is
   shown as an age ("3 days ago", via `age`) rather than a date, since
-  formatting local dates would need a timezone library.
+  formatting local dates would need a timezone library. Share is each
+  entry's size over `scanner.current_size()` (the whole folder, even with
+  a filter set), drawn by `usage_bar`.
+- Usage bars (`usage_bar`, `bar_fill`) use eighth-block characters so
+  their end is drawn to 1/8 of a cell, on a dim `░` track. Columns other
+  than names have fixed widths and names take the rest (`Constraint::Fill`);
+  `bar_width` sizes the bar from the terminal width (5 to 20 cells, keeping
+  names at least 24). Bars are colored only on ordinary rows: on the
+  highlighted row (and while scanning) they take the row's own colors over
+  a blank track, so the black-on-yellow highlight stays readable.
 - Each full-screen view's top border is just its title ("DUV — <path>",
   "DUV — disk usage visualizer", "DUV — error"), and its bottom border
   lists the keys that work there (`key_hints`, e.g. "l open · h back ·
