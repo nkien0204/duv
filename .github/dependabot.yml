@@ -1,0 +1,28 @@
+# Dependabot opens pull requests to keep dependencies up to date; CI,
+# including the cargo-deny checks in security.yml, runs on each one.
+version: 2
+updates:
+  # Rust crates (Cargo.toml and Cargo.lock).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # One PR for all minor and patch updates instead of one per crate;
+    # major updates still get their own PR.
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+
+  # Actions used in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
