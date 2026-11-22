@@ -1,0 +1,35 @@
+name: Security
+
+# Checks duv's dependencies against the policy in deny.toml with cargo-deny:
+# known vulnerabilities, unmaintained and yanked crates (the RustSec
+# advisory database), licenses, banned crates and allowed sources. It also
+# runs daily, because new advisories are published for dependencies that
+# haven't changed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 2 * * *" # every day at 02:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Advisories on their own, so a newly published advisory shows up
+        # as its own failing check, separate from license or source rules.
+        checks:
+          - advisories
+          - bans licenses sources
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}

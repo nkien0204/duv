@@ -116,6 +116,11 @@ limitation is found.
 - **Dependencies**: this is a terminal application meant to be fast and
   lightweight — justify new dependencies, prefer well-maintained crates,
   and avoid heavy transitive dependency trees when a simpler option exists.
+  Every dependency (including transitive ones, on every shipped platform)
+  must pass `deny.toml`: no known vulnerabilities, unmaintained or yanked
+  crates, a license from its allow-list (permissive, MIT-compatible), and
+  crates.io as the only source. A new license needs a deliberate review
+  before it's added to the list.
 - **Naming**: standard Rust naming (`snake_case` for functions/variables,
   `CamelCase` for types, `SCREAMING_SNAKE_CASE` for consts).
 
@@ -128,10 +133,20 @@ cargo build
 cargo test
 cargo fmt --check
 cargo clippy
+cargo deny check   # needs cargo-deny: `cargo install --locked cargo-deny`
 ```
 
 If any of these fail because of pre-existing issues unrelated to your
 change, note it rather than silently ignoring it.
+
+The Security workflow (`.github/workflows/security.yml`) runs
+`cargo deny check` on every pull request, on pushes to `main` and daily,
+since RustSec publishes new advisories against unchanged dependencies.
+When an advisory appears, prefer upgrading (or replacing) the affected
+crate; if it genuinely doesn't affect duv and no fix exists, add it to
+`ignore` in `deny.toml` with a `reason`. Dependabot
+(`.github/dependabot.yml`) opens weekly PRs for crate and GitHub Actions
+updates (minor and patch grouped into one PR).
 
 CI (`.github/workflows/ci.yml`) runs the same checks on every push to
 `main` and every pull request, on Linux (x86_64 and ARM), macOS and

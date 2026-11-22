@@ -6,6 +6,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the `trash` dependency to 5.4, which replaces the unmaintained
+  `chrono` crate (RUSTSEC-2026-0543) with `jiff`. Moving to the Trash
+  works as before.
+
 ## [0.2.0] - 2026-10-24
 
 ### Added

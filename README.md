@@ -1,6 +1,7 @@
 # duv (Disk Usage Visualizer)
 
 [![CI](https://github.com/nkien0204/duv/actions/workflows/ci.yml/badge.svg)](https://github.com/nkien0204/duv/actions/workflows/ci.yml)
+[![Security](https://github.com/nkien0204/duv/actions/workflows/security.yml/badge.svg)](https://github.com/nkien0204/duv/actions/workflows/security.yml)
 
 A fast terminal-based disk usage manager, written in Rust.
 
@@ -184,7 +185,14 @@ cargo run
 cargo test
 cargo fmt
 cargo clippy
+cargo deny check   # dependency policy, needs cargo-deny
 ```
+
+Dependencies are checked against [`deny.toml`](./deny.toml) with
+[cargo-deny](https://github.com/EmbarkStudios/cargo-deny) on every pull
+request and daily: known vulnerabilities and unmaintained crates (from the
+RustSec advisory database), licenses, and sources. Dependabot opens weekly
+pull requests to keep crates and GitHub Actions up to date.
 
 The images in this README are recorded with [VHS](https://github.com/charmbracelet/vhs)
 on a made-up folder; to update them after UI changes:
