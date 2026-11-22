@@ -166,6 +166,41 @@ On Windows, sizes are file lengths rather than allocated space (so sparse
 files count in full), hard links aren't detected, and other drives
 mounted inside a scanned folder aren't left out.
 
+## Compared to similar tools
+
+There are several good disk usage tools already. Here's how duv
+compares, based on each project's own documentation (as of November 2026;
+corrections welcome):
+
+| | duv | [ncdu] | [gdu] | [dua-cli] | [dust] | [diskonaut] |
+|---|---|---|---|---|---|---|
+| Language | Rust | Zig (2.x), C (1.x) | Go | Rust | Rust | Rust |
+| Interactive TUI | ✅ | ✅ | ✅ | ✅ (`dua i`) | ❌ prints a tree | ✅ treemap |
+| Parallel scanning | ✅ | opt-in (`-t`, 2.5+) | ✅ | ✅ | ✅ | – |
+| Move to Trash | ✅ built in | via `--delete-command` | ✅ (`D`) | ✅ | ❌ | delete only |
+| Pick from mounted disks | ✅ | ❌ | ✅ (`-d`) | ❌ | ❌ | ❌ |
+| Sort by size, name, modified | ✅ | ✅ | ✅ | size, name | size | ❌ |
+| Filter by name as you type | ✅ | ❌ | ❌ | – | regex flags | ❌ |
+| Show in file manager, copy path | ✅ (also over SSH) | ❌ | web UI only | – | ❌ | ❌ |
+| Memory cap on huge trees | ✅ `--memory-budget` | ❌ | on-disk `--db` | ❌ | – | ❌ |
+| Export / import scans | ❌ | ✅ | ✅ | ✅ | JSON output | ❌ |
+| Windows | ✅ | third-party builds | ✅ | ✅ | ✅ | ✅ |
+
+– means the project's documentation doesn't say.
+
+In short: duv focuses on safe, quick cleanup (scan, find what's big, send
+it to the Trash) with a bounded memory footprint, on every major
+platform. Reach for **ncdu** or **gdu** if you need to export a scan and
+browse it later or on another machine, **dust** for a quick
+non-interactive overview in scripts, and **diskonaut** if you prefer a
+treemap and want to browse while the scan is still running.
+
+[ncdu]: https://dev.yorhel.nl/ncdu
+[gdu]: https://github.com/dundee/gdu
+[dua-cli]: https://github.com/Byron/dua-cli
+[dust]: https://github.com/bootandy/dust
+[diskonaut]: https://github.com/imsnif/diskonaut
+
 ## Roadmap
 
 - Search the whole scanned tree and jump to a result

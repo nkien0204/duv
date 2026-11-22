@@ -6,6 +6,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- README: a comparison with similar tools (ncdu, gdu, dua-cli, dust,
+  diskonaut).
+
 ### Changed
 
 - Updated the `trash` dependency to 5.4, which replaces the unmaintained
