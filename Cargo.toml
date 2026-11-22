@@ -16,7 +16,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 ratatui = "0.30"
 rayon = "1.12"
-sysinfo = { version = "0.39", default-features = false, features = ["disk"] }
+sysinfo = { version = "0.40", default-features = false, features = ["disk"] }
 trash = "5.4.0"
 
 [target.'cfg(unix)'.dependencies]
